@@ -176,10 +176,12 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
       }
       const data = await res.json()
       // SG wraps results differently depending on API version
-      const items: any[] = data?.searchResults?.items
-        ?? data?.items
+      // SG wraps responses: {status, message, data: {searchResults: {items: [...]}}}
+      const items: any[] = data?.data?.searchResults?.items
+        ?? data?.searchResults?.items
         ?? data?.data?.items
-        ?? data?.data
+        ?? data?.items
+        ?? (Array.isArray(data?.data) ? data.data : [])
         ?? []
       console.log(`  SG "${keyword}" p${page}: ${items.length} items`)
       if (!items.length) break
@@ -540,6 +542,10 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   }
 
   console.log(`Found ${rawItems.length} unique items`)
+  console.log(`  SG: ${rawItems.filter(i => i.source === 'ShopGoodwill').length} | CTBids: ${rawItems.filter(i => i.source === 'CTBids').length}`)
+  if (rawItems.length > 0) {
+    console.log(`  Sample: "${rawItems[0].title}" $${rawItems[0].current_bid} [${rawItems[0].source}]`)
+  }
   const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[] = []
 
   // Filter out obviously bad items first
