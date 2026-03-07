@@ -96,7 +96,7 @@ export default function ConfigPage() {
 
   const addPreset = (name: string) => {
     const kws = PRESET_KEYWORDS[name] ?? []
-    update('keywords', [...new Set([...config.keywords, ...kws])])
+    update('keywords', Array.from(new Set([...config.keywords, ...kws])))
   }
 
   const TABS = [
@@ -116,7 +116,6 @@ export default function ConfigPage() {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
-      {/* Header */}
       <header className="border-b sticky top-0 z-40 backdrop-blur-md" style={{ borderColor: 'var(--border2)', background: 'rgba(8,13,24,0.95)' }}>
         <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -131,7 +130,6 @@ export default function ConfigPage() {
       </header>
 
       <div className="max-w-3xl mx-auto px-4 py-6">
-        {/* Source toggle */}
         <div className="card p-4 mb-6 flex items-center gap-4 flex-wrap">
           <span className="text-xs text-slate-500 font-semibold uppercase tracking-wider">Scan sources:</span>
           {['shopgoodwill', 'ctbids'].map(src => {
@@ -149,7 +147,6 @@ export default function ConfigPage() {
           })}
         </div>
 
-        {/* Tabs */}
         <div className="flex gap-1 mb-5 border-b" style={{ borderColor: 'var(--border2)' }}>
           {TABS.map(t => (
             <button key={t.id} onClick={() => setTab(t.id as typeof tab)}
@@ -162,7 +159,6 @@ export default function ConfigPage() {
           ))}
         </div>
 
-        {/* Keywords Tab */}
         {tab === 'keywords' && (
           <div className="flex flex-col gap-5">
             <div className="card p-5">
@@ -184,7 +180,6 @@ export default function ConfigPage() {
                 placeholder="Type keyword and press Enter…"
               />
             </div>
-
             <div className="card p-5">
               <div className="mb-4">
                 <h3 className="font-semibold text-slate-200 mb-1">High-Value Boosters</h3>
@@ -200,7 +195,6 @@ export default function ConfigPage() {
           </div>
         )}
 
-        {/* Scoring Tab */}
         {tab === 'scoring' && (
           <div className="card p-5">
             <Slider label="Minimum Deal Score" value={config.min_deal_score} min={20} max={90} step={5}
@@ -225,18 +219,15 @@ export default function ConfigPage() {
               <p className="text-xs text-slate-500 mb-2">Optional — improves game/console value accuracy. Get free at pricecharting.com/api</p>
               <input
                 placeholder="Leave blank to use eBay sold listings"
-                value={(config as Record<string, unknown>).pricecharting_api_key as string ?? ''}
-                onChange={e => update('keywords', config.keywords)} // placeholder — stored separately
+                value={''}
+                onChange={() => {}}
               />
             </div>
           </div>
         )}
 
-        {/* Alerts Tab */}
         {tab === 'alerts' && (
           <div className="flex flex-col gap-4">
-
-            {/* SMS */}
             <div className="card p-5" style={{ borderColor: config.sms_enabled ? 'rgba(34,197,94,0.35)' : undefined }}>
               <div className="flex items-center justify-between mb-3">
                 <div>
@@ -278,7 +269,6 @@ export default function ConfigPage() {
               <p className="text-xs text-slate-600 mt-2">Free trial credit covers ~1,800 texts. Then ~$1/mo for number + $0.008/text.</p>
             </div>
 
-            {/* Email */}
             <div className="card p-5">
               <h3 className="font-semibold text-slate-200 mb-1">📧 Email Alerts</h3>
               <p className="text-xs text-slate-500 mb-4">Full HTML digest with images + AI analysis. Uses Resend (free: 3000/month).</p>
@@ -318,11 +308,9 @@ export default function ConfigPage() {
                 <div className="flex gap-3"><span className="text-slate-500">🔁</span><span>Each deal only notifies once — no repeated pings for the same listing</span></div>
               </div>
             </div>
-
           </div>
         )}
 
-        {/* Advanced Tab */}
         {tab === 'advanced' && (
           <div className="flex flex-col gap-4">
             <div className="card p-5">
@@ -345,21 +333,17 @@ export default function ConfigPage() {
             <div className="card p-5">
               <h3 className="font-semibold text-slate-200 mb-3">Scan Schedule</h3>
               <p className="text-xs text-slate-400 mb-3">
-                The scanner runs automatically via Vercel Cron. Current schedule: <strong className="text-sky-400">every 6 hours</strong>.
-                To change it, edit <code className="text-sky-400 bg-slate-900 px-1 rounded">vercel.json</code> and redeploy.
+                Use cron-job.org to call <code className="text-sky-400 bg-slate-900 px-1 rounded">/api/scan</code> automatically every few hours.
+                Set the Authorization header to <code className="text-sky-400 bg-slate-900 px-1 rounded">Bearer YOUR_CRON_SECRET</code>.
               </p>
-              <div className="bg-slate-950 rounded p-3 text-xs font-mono text-slate-400 border" style={{ borderColor: 'var(--border2)' }}>
-                {`"crons": [{ "path": "/api/scan", "schedule": "0 */6 * * *" }]`}
-              </div>
-              <p className="text-xs text-slate-600 mt-2">Note: Vercel Hobby allows 1 cron/day. Pro allows every hour. For more frequent scans on Hobby, use cron-job.org to call /api/scan with your CRON_SECRET header.</p>
+              <p className="text-xs text-slate-600">Vercel Hobby allows 1 cron/day. Use cron-job.org (free) for more frequent scans.</p>
             </div>
 
-            <div className="card p-5 border-red-900/30" style={{ borderColor: 'rgba(127,29,29,0.4)' }}>
+            <div className="card p-5" style={{ borderColor: 'rgba(127,29,29,0.4)' }}>
               <h3 className="font-semibold text-red-400 mb-3">Danger Zone</h3>
               <button
                 onClick={async () => {
                   if (!confirm('Delete all dismissed deals? This cannot be undone.')) return
-                  // Could add a delete-dismissed API endpoint
                   alert('To delete deals, go to your Supabase dashboard and run: DELETE FROM deals WHERE dismissed = true')
                 }}
                 className="btn text-xs" style={{ background: '#3a1515', color: '#f87171', border: '1px solid #f871712a' }}
