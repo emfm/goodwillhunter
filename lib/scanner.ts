@@ -1,4 +1,95 @@
 import { AppConfig, Deal } from './types'
+import { createCipheriv } from 'crypto'
+
+// ── Stealth helpers ───────────────────────────────────────────────────────────
+// Randomized delays and headers so scans look like normal browser traffic.
+
+// Random int between min and max (inclusive)
+function randInt(min: number, max: number) {
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
+
+// Random delay in a range — call between every request
+function jitter(minMs: number, maxMs: number) {
+  return new Promise(r => setTimeout(r, randInt(minMs, maxMs)))
+}
+
+// Rotate through realistic Chrome UA strings
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
+]
+function randomUA() {
+  return USER_AGENTS[randInt(0, USER_AGENTS.length - 1)]
+}
+
+// ── ShopGoodwill auth ─────────────────────────────────────────────────────────
+// SG encrypts credentials with AES-256-CBC before sending to login endpoint.
+// Key and IV are hardcoded in their JS bundle (secretKeyURL + fixed IV).
+const SG_KEY = Buffer.from('6696D2E6F042FEC4D6E3F32AD541143B', 'utf8') // 32 bytes
+const SG_IV  = Buffer.from('0000000000000000', 'utf8')                  // 16 bytes
+
+function encryptForSG(text: string): string {
+  const cipher = createCipheriv('aes-256-cbc', SG_KEY, SG_IV)
+  let enc = cipher.update(text, 'utf8', 'base64')
+  enc += cipher.final('base64')
+  return encodeURIComponent(enc)
+}
+
+let _sgToken: string | null = null
+let _sgTokenExpiry = 0
+
+async function getSGToken(): Promise<string | null> {
+  const now = Date.now()
+  if (_sgToken && now < _sgTokenExpiry) return _sgToken
+
+  const user = process.env.SHOPGOODWILL_USERNAME
+  const pass = process.env.SHOPGOODWILL_PASSWORD
+  if (!user || !pass) {
+    console.log('No SHOPGOODWILL_USERNAME/PASSWORD set — ShopGoodwill search disabled.')
+    return null
+  }
+
+  try {
+    const res = await fetch('https://buyerapi.shopgoodwill.com/api/SignIn/Login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Origin': 'https://shopgoodwill.com',
+        'Referer': 'https://shopgoodwill.com/',
+        'User-Agent': randomUA(),
+        'Accept': 'application/json, text/plain, */*',
+      },
+      body: JSON.stringify({
+        userName: encryptForSG(user),
+        password: encryptForSG(pass),
+        browser: 'chrome',
+        appVersion: '0ac533a6087baed7',
+        remember: false,
+      }),
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!res.ok) {
+      console.warn('ShopGoodwill login failed, status:', res.status)
+      return null
+    }
+    const data = await res.json()
+    if (!data?.accessToken) {
+      console.warn('ShopGoodwill login returned no token:', data?.message ?? JSON.stringify(data).slice(0, 100))
+      return null
+    }
+    _sgToken = data.accessToken
+    _sgTokenExpiry = now + 23 * 60 * 60 * 1000 // tokens last ~24h, refresh at 23h
+    console.log('ShopGoodwill login OK')
+    return _sgToken
+  } catch (e) {
+    console.warn('ShopGoodwill login error:', e)
+    return null
+  }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface RawItem {
@@ -50,16 +141,23 @@ function isExpired(endTimeStr: string): boolean {
 
 // ── ShopGoodwill ──────────────────────────────────────────────────────────────
 async function searchShopGoodwill(keyword: string, maxPrice: number, pages: number): Promise<RawItem[]> {
+  const token = await getSGToken()
+  if (!token) return []
+
   const results: RawItem[] = []
+  // Random cold-start delay so cron runs don't hit at identical timestamps
+  await jitter(500, 4000)
   for (let page = 1; page <= pages; page++) {
     try {
       const res = await fetch('https://buyerapi.shopgoodwill.com/api/Search/ItemListing', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': 'Mozilla/5.0',
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${token}`,
           'Origin': 'https://shopgoodwill.com',
           'Referer': 'https://shopgoodwill.com/',
+          'User-Agent': randomUA(),
         },
         body: JSON.stringify({
           searchText: keyword, categoryIds: '', selectedCategoryIds: '',
@@ -71,26 +169,38 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
         }),
         signal: AbortSignal.timeout(12000),
       })
-      if (!res.ok) break
+      if (!res.ok) {
+        console.warn(`ShopGoodwill search HTTP ${res.status} for "${keyword}" p${page}`)
+        if (res.status === 401) { _sgToken = null } // force re-login next time
+        break
+      }
       const data = await res.json()
-      const items = data?.searchResults?.items ?? []
+      // SG wraps results differently depending on API version
+      const items: any[] = data?.searchResults?.items
+        ?? data?.items
+        ?? data?.data?.items
+        ?? data?.data
+        ?? []
+      console.log(`  SG "${keyword}" p${page}: ${items.length} items`)
       if (!items.length) break
       for (const item of items) {
-        const endTime = item.endTime ?? ''
+        const endTime = item.endTime ?? item.closingDate ?? ''
         if (isExpired(endTime)) continue
+        const bid = parseFloat(item.currentPrice ?? item.minimumBid ?? 0)
+        if (bid > maxPrice) continue
         results.push({
           title: item.title ?? '',
-          current_bid: parseFloat(item.currentPrice ?? 0),
+          current_bid: bid,
           url: `https://shopgoodwill.com/item/${item.itemId}`,
-          image_url: item.imageURL ?? '',
+          image_url: item.imageURL ?? item.galleryURL ?? '',
           end_time: endTime,
           time_remaining: timeRemaining(endTime),
-          num_bids: parseInt(item.numberOfBids ?? 0),
+          num_bids: parseInt(item.numberOfBids ?? item.numBids ?? 0),
           source: 'ShopGoodwill',
           matched_keyword: keyword,
         })
       }
-      await sleep(1000)
+      await jitter(1200, 3500)
     } catch (e) {
       console.warn(`ShopGoodwill error (${keyword}):`, e)
       break
@@ -99,41 +209,133 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
   return results
 }
 
+// ── CTBids auth ───────────────────────────────────────────────────────────────
+// Login: POST https://ctbids.com/services/api/v1/buyer/auth/token
+// Body:  {"data": {"username": "email@x.com", "password": "pass"}}
+// Returns: {access: "<jwt>", refresh: "<jwt>"}
+// Search: POST https://sale.ctbids.com/services/api/v1/search/item/search/list
+// Headers: Authorization: Bearer <access>
+let _ctToken: string | null = null
+let _ctTokenExpiry = 0
+
+async function getCTToken(): Promise<string | null> {
+  const now = Date.now()
+  if (_ctToken && now < _ctTokenExpiry) return _ctToken
+
+  const user = process.env.CTBIDS_USERNAME
+  const pass = process.env.CTBIDS_PASSWORD
+  if (!user || !pass) {
+    console.log('No CTBIDS_USERNAME/PASSWORD set — CTBids search disabled.')
+    return null
+  }
+
+  try {
+    const res = await fetch('https://ctbids.com/services/api/v1/buyer/auth/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Origin': 'https://ctbids.com',
+        'Referer': 'https://ctbids.com/',
+        'User-Agent': randomUA(),
+      },
+      body: JSON.stringify({ data: { username: user, password: pass } }),
+      signal: AbortSignal.timeout(15000),
+    })
+
+    const data = await res.json()
+
+    // Success: {access: "...", refresh: "..."}  OR wrapped in data
+    const access = data?.access ?? data?.data?.access ?? data?.data?.[0]?.access
+    if (!access) {
+      console.warn('CTBids login failed:', data?.message ?? JSON.stringify(data).slice(0, 100))
+      return null
+    }
+
+    _ctToken = access
+    // CTBids JWTs typically expire in 1hr — refresh at 55m
+    _ctTokenExpiry = now + 55 * 60 * 1000
+    console.log('CTBids login OK')
+    return _ctToken
+  } catch (e) {
+    console.warn('CTBids login error:', e)
+    return null
+  }
+}
+
 // ── CTBids ────────────────────────────────────────────────────────────────────
 async function searchCTBids(keyword: string, maxPrice: number, pages: number): Promise<RawItem[]> {
+  const token = await getCTToken()
+  if (!token) return []
+
   const results: RawItem[] = []
+  // Random cold-start delay — stagger CTBids from ShopGoodwill requests
+  await jitter(1000, 6000)
   for (let page = 1; page <= pages; page++) {
     try {
-      const params = new URLSearchParams({
-        searchText: keyword, pageNumber: String(page),
-        pageSize: '40', sortOrder: 'ClosingDateASC', isSearchDescription: 'true',
-      })
-      const res = await fetch(`https://www.ctbids.com/api/item/search?${params}`, {
-        headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0', Referer: 'https://www.ctbids.com/' },
+      const res = await fetch('https://sale.ctbids.com/services/api/v1/search/item/search/list', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'Origin': 'https://ctbids.com',
+          'Referer': 'https://ctbids.com/',
+          'User-Agent': randomUA(),
+        },
+        body: JSON.stringify({
+          keyword,
+          pageNumber: page,
+          pageSize: 40,
+          sortOrder: 'ClosingDateASC',
+        }),
         signal: AbortSignal.timeout(12000),
       })
-      if (!res.ok) break
+
+      if (!res.ok) {
+        console.warn(`CTBids search HTTP ${res.status} for "${keyword}" p${page}`)
+        if (res.status === 401) { _ctToken = null }
+        break
+      }
+
       const data = await res.json()
-      const items = data?.items ?? data?.data ?? []
+      if (data?.status === 'failed') {
+        console.warn(`CTBids search failed: ${data.message}`)
+        if (data.message?.includes('Invalid') || data.message?.includes('expired')) {
+          _ctToken = null
+        }
+        break
+      }
+
+      // Response may be wrapped: {data: [...]} or {data: {itemList: [...]}} etc.
+      const items: any[] = data?.data?.itemList
+        ?? data?.data?.items
+        ?? data?.data
+        ?? data?.itemList
+        ?? data?.items
+        ?? []
+
+      console.log(`  CTBids "${keyword}" p${page}: ${items.length} items`)
       if (!items.length) break
+
       for (const item of items) {
-        const endTime = (item.closingDate ?? item.endDate ?? '').slice(0, 19)
+        const endTime = (item.closingDate ?? item.closingTime ?? item.endDate ?? '').slice(0, 19)
         if (isExpired(endTime)) continue
-        const bid = parseFloat(item.currentBid ?? item.currentPrice ?? 0)
+        const bid = parseFloat(item.currentBid ?? item.currentPrice ?? item.startBid ?? 0)
         if (bid > maxPrice) continue
         results.push({
-          title: item.title ?? item.name ?? '',
+          title: item.title ?? item.name ?? item.itemName ?? '',
           current_bid: bid,
           url: `https://www.ctbids.com/#!/item/detail/${item.itemId ?? item.id}`,
-          image_url: item.imageURL ?? item.thumbnailURL ?? '',
+          image_url: item.imageURL ?? item.thumbnailURL ?? item.primaryImage ?? '',
           end_time: endTime,
           time_remaining: timeRemaining(endTime),
-          num_bids: parseInt(item.bidCount ?? 0),
+          num_bids: parseInt(item.bidCount ?? item.numberOfBids ?? 0),
           source: 'CTBids',
           matched_keyword: keyword,
         })
       }
-      await sleep(1000)
+      await jitter(1200, 3500)
     } catch (e) {
       console.warn(`CTBids error (${keyword}):`, e)
       break
@@ -220,7 +422,7 @@ async function analyzeImage(imageUrl: string, title: string): Promise<ImageAnaly
 
   try {
     const imgRes = await fetch(imageUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
+      headers: { 'User-Agent': randomUA() },
       signal: AbortSignal.timeout(8000),
     })
     if (!imgRes.ok) return null
@@ -334,7 +536,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
         if (!seen.has(item.url)) { seen.add(item.url); rawItems.push(item) }
       }
     }
-    await sleep(600)
+    await jitter(2000, 5000)
   }
 
   console.log(`Found ${rawItems.length} unique items`)
