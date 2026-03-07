@@ -240,7 +240,7 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
 }
 
 // ── CTBids auth ───────────────────────────────────────────────────────────────
-// Login: POST https://ctbids.com/services/api/v1/buyer/auth/token
+// Login: POST https://admin.ctbids.com/services/api/v1/admin/auth/token
 // Body:  {"data": {"username": "email@x.com", "password": "pass"}}
 // Returns: {access: "<jwt>", refresh: "<jwt>"}
 // Search: POST https://sale.ctbids.com/services/api/v1/search/item/search/list
@@ -262,7 +262,7 @@ async function getCTToken(): Promise<string | null> {
   console.log(`CTBids login attempt: user="${user}" (${user.length} chars), pass length=${pass.length}`)
 
   try {
-    const res = await fetch('https://ctbids.com/services/api/v1/buyer/auth/token', {
+    const res = await fetch('https://admin.ctbids.com/services/api/v1/admin/auth/token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -277,10 +277,14 @@ async function getCTToken(): Promise<string | null> {
 
     const data = await res.json()
 
-    // Success: {access: "...", refresh: "..."}  OR wrapped in data
+    // Admin endpoint returns {access: "...", refresh: "..."} on success
+    // Error: {status:"failed", message:{CBMSW:{message:"..."}, CBMSM:{...}}}
     const access = data?.access ?? data?.data?.access ?? data?.data?.[0]?.access
     if (!access) {
-      console.warn('CTBids login failed:', data?.message ?? JSON.stringify(data).slice(0, 100))
+      const errMsg = typeof data?.message === 'object'
+        ? data.message?.CBMSW?.message ?? JSON.stringify(data.message).slice(0, 120)
+        : data?.message ?? JSON.stringify(data).slice(0, 120)
+      console.warn('CTBids login failed:', errMsg)
       return null
     }
 
