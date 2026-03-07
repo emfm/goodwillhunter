@@ -142,66 +142,64 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
   return results
 }
 
-// ── Value estimator ───────────────────────────────────────────────────────────
+// ── Value estimator (Claude-powered) ─────────────────────────────────────────
 const valueCache = new Map<string, { value: number; source: string }>()
+
+// Batch multiple titles into one Claude call to save time + cost
+const VALUE_BATCH_SYSTEM = `You are an expert resale price estimator for thrift auction items — vintage video games, retro electronics, big-box PC games, trading cards, signed memorabilia, and collectibles.
+
+Given a list of auction item titles, estimate the realistic resale value (what it would sell for on eBay in used/good condition). Be conservative — base your estimate on actual recent sold prices.
+
+Respond ONLY with a JSON array in this exact format, one entry per title in the same order:
+[{"value": 25.00, "note": "NES game, loose cart, common title"}, ...]
+
+Rules:
+- value: USD number, 0 if you have no idea or it's clearly junk/non-collectible
+- note: very brief reason (one short phrase)
+- Never refuse or add any other text — just the JSON array`
+
+async function estimateValueBatch(titles: string[]): Promise<Array<{ value: number; source: string }>> {
+  if (!titles.length) return []
+  if (!process.env.ANTHROPIC_API_KEY) return titles.map(() => ({ value: 0, source: '' }))
+
+  try {
+    const prompt = titles.map((t, i) => `${i + 1}. ${t}`).join('\n')
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY!,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001', // fast + cheap for bulk value lookups
+        max_tokens: 1024,
+        system: VALUE_BATCH_SYSTEM,
+        messages: [{ role: 'user', content: `Estimate resale values for these auction items:\n\n${prompt}` }],
+      }),
+      signal: AbortSignal.timeout(20000),
+    })
+
+    if (!res.ok) return titles.map(() => ({ value: 0, source: '' }))
+    const data = await res.json()
+    const raw = data.content?.[0]?.text?.trim() ?? '[]'
+    const clean = raw.replace(/^```[a-z]*\n?|\n?```$/gm, '').trim()
+    const parsed = JSON.parse(clean) as Array<{ value: number; note: string }>
+
+    return parsed.map(p => ({
+      value: Math.round((Number(p.value) || 0) * 100) / 100,
+      source: `Claude estimate: ${p.note ?? ''}`,
+    }))
+  } catch (e) {
+    console.warn('Value estimation error:', e)
+    return titles.map(() => ({ value: 0, source: '' }))
+  }
+}
 
 async function estimateValue(title: string): Promise<{ value: number; source: string }> {
   if (valueCache.has(title)) return valueCache.get(title)!
-
-  // PriceCharting
-  try {
-    const res = await fetch(
-      `https://www.pricecharting.com/api/products?q=${encodeURIComponent(title)}&status=price`,
-      { signal: AbortSignal.timeout(8000) }
-    )
-    if (res.ok) {
-      const data = await res.json()
-      const products = data?.products ?? []
-      if (products.length) {
-        const p = products[0]
-        const val = Math.max(
-          Number(p['cib-price'] ?? 0),
-          Number(p['loose-price'] ?? 0),
-          Number(p['graded-price'] ?? 0)
-        ) / 100
-        if (val > 0) {
-          const result = { value: val, source: `PriceCharting (${p['product-name'] ?? ''})` }
-          valueCache.set(title, result)
-          return result
-        }
-      }
-    }
-  } catch {/* fallthrough */}
-
-  // eBay sold listings
-  try {
-    const params = new URLSearchParams({
-      _nkw: title, LH_Complete: '1', LH_Sold: '1', _sop: '13', _ipg: '25',
-    })
-    const res = await fetch(`https://www.ebay.com/sch/i.html?${params}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120' },
-      signal: AbortSignal.timeout(10000),
-    })
-    if (res.ok) {
-      const html = await res.text()
-      const matches = [...html.matchAll(/\$([0-9,]+\.?\d*)/g)]
-      const prices = matches
-        .map(m => parseFloat(m[1].replace(/,/g, '')))
-        .filter(p => p > 0.5 && p < 5000)
-      if (prices.length >= 3) {
-        prices.sort((a, b) => a - b)
-        const q1 = Math.floor(prices.length / 4)
-        const q3 = Math.floor((3 * prices.length) / 4)
-        const mid = prices.slice(q1, q3 > q1 ? q3 : undefined)
-        const median = mid.reduce((a, b) => a + b, 0) / mid.length
-        const result = { value: Math.round(median * 100) / 100, source: `eBay sold (${prices.length} listings)` }
-        valueCache.set(title, result)
-        return result
-      }
-    }
-  } catch {/* fallthrough */}
-
-  const result = { value: 0, source: '' }
+  const results = await estimateValueBatch([title])
+  const result = results[0] ?? { value: 0, source: '' }
   valueCache.set(title, result)
   return result
 }
@@ -342,10 +340,29 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   console.log(`Found ${rawItems.length} unique items`)
   const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[] = []
 
-  for (const item of rawItems) {
-    if (!item.title || item.current_bid <= 0) continue
+  // Filter out obviously bad items first
+  const candidates = rawItems.filter(item => item.title && item.current_bid > 0)
 
-    const { value: estVal, source: valSrc } = await estimateValue(item.title)
+  // Batch value estimation — one Claude call per 30 items (fast + cheap with Haiku)
+  const BATCH_SIZE = 30
+  const valueMap = new Map<string, { value: number; source: string }>()
+  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+    const batch = candidates.slice(i, i + BATCH_SIZE)
+    const uncached = batch.filter(item => !valueCache.has(item.title))
+    if (uncached.length > 0) {
+      console.log(`Estimating values for batch of ${uncached.length} items...`)
+      const results = await estimateValueBatch(uncached.map(item => item.title))
+      uncached.forEach((item, idx) => {
+        valueCache.set(item.title, results[idx] ?? { value: 0, source: '' })
+      })
+    }
+    batch.forEach(item => {
+      valueMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' })
+    })
+  }
+
+  for (const item of candidates) {
+    const { value: estVal, source: valSrc } = valueMap.get(item.url) ?? { value: 0, source: '' }
     if (estVal <= 0) continue
     if (estVal / item.current_bid < config.min_value_ratio * 0.65) continue
 
