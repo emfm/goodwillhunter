@@ -271,7 +271,8 @@ async function getCTToken(): Promise<string | null> {
         'Referer': 'https://ctbids.com/',
         'User-Agent': randomUA(),
       },
-      body: JSON.stringify({ data: { username: user.toLowerCase(), password: pass } }),
+      // CTBids frontend btoa()-encodes the password before sending (chunk 337.b89117d8)
+      body: JSON.stringify({ data: { username: user.toLowerCase(), password: Buffer.from(pass).toString('base64'), 'keep-user-logged-in': false } }),
       signal: AbortSignal.timeout(15000),
     })
 
