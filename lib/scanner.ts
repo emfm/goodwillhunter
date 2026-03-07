@@ -173,6 +173,8 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
           socs: false,      // searchOneCentShippingOnly
           sd: true,         // searchDescriptions
           sca: false,       // searchClosedAuctions
+          // caed = today's date in M/d/yyyy — REQUIRED; omitting it causes HTTP 500
+          caed: (() => { const d = new Date(); return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}` })(),
           cadb: 7,          // closedAuctionDaysBack
           scs: false,       // searchCanadaShipping
           sis: false,       // searchInternationalShippingOnly
