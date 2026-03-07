@@ -46,8 +46,8 @@ async function getSGToken(): Promise<string | null> {
   const now = Date.now()
   if (_sgToken && now < _sgTokenExpiry) return _sgToken
 
-  const user = process.env.SHOPGOODWILL_USERNAME
-  const pass = process.env.SHOPGOODWILL_PASSWORD
+  const user = (process.env.SHOPGOODWILL_USERNAME ?? '').trim()
+  const pass = (process.env.SHOPGOODWILL_PASSWORD ?? '').trim()
   if (!user || !pass) {
     console.log('No SHOPGOODWILL_USERNAME/PASSWORD set — ShopGoodwill search disabled.')
     return null
@@ -159,45 +159,71 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
           'Referer': 'https://shopgoodwill.com/',
           'User-Agent': randomUA(),
         },
+        // SG bundle (main.0ac533a6087baed7.js) uses abbreviated keys — long names return HTTP 500
         body: JSON.stringify({
-          searchText: keyword, categoryIds: '', selectedCategoryIds: '',
-          closedAuctionDays: 0, startingPrice: 0, maxPrice,
-          isBuyNow: false, isPickupOnly: false, isSearchDescriptions: true,
-          favorites: false, sortColumn: 'ClosingDate', sortDescending: false,
-          page, pageSize: 40, sellerId: 0, sellerName: '',
-          catLevel: 0, catId: 0, locationId: 0,
+          st: keyword,      // searchText
+          sg: '',           // selectedGroup
+          c: '',            // selectedCategoryIds
+          s: '',            // selectedSellerIds
+          lp: 0,            // lowPrice
+          hp: maxPrice,     // highPrice
+          sbn: 0,           // searchBuyNowOnly (0=all,1=buyNow,2=auction)
+          spo: false,       // searchPickupOnly
+          snpo: false,      // searchNoPickupOnly
+          socs: false,      // searchOneCentShippingOnly
+          sd: true,         // searchDescriptions
+          sca: false,       // searchClosedAuctions
+          cadb: 7,          // closedAuctionDaysBack
+          scs: false,       // searchCanadaShipping
+          sis: false,       // searchInternationalShippingOnly
+          col: 1,           // sortColumn (1=ClosingDate)
+          p: page,          // page
+          ps: 40,           // pageSize
+          desc: false,      // sortDescending
+          ss: 0,            // savedSearchId
+          UseBuyerPrefs: true,
+          sus: false,       // searchUSOnlyShipping
+          cln: 1,           // categoryLevelNo
+          catIds: '',       // catIds
+          pn: '',           // partNumber
+          wc: false,        // isWeddingCategory
+          mci: false,       // isMultipleCategoryIds
+          hmt: false,       // isFromHeaderMenuTab
+          layout: 'grid',
+          ihp: '',          // isFromHomePage
         }),
         signal: AbortSignal.timeout(12000),
       })
       if (!res.ok) {
-        console.warn(`ShopGoodwill search HTTP ${res.status} for "${keyword}" p${page}`)
+        const errText = await res.text().catch(() => '')
+        console.warn(`ShopGoodwill search HTTP ${res.status} for "${keyword}" p${page} — ${errText.slice(0, 120)}`)
         if (res.status === 401) { _sgToken = null } // force re-login next time
         break
       }
       const data = await res.json()
-      // SG wraps results differently depending on API version
-      // SG wraps responses: {status, message, data: {searchResults: {items: [...]}}}
+      // SG response: {status, message, data: {searchResults: {items: [...]}}}
       const items: any[] = data?.data?.searchResults?.items
         ?? data?.searchResults?.items
         ?? data?.data?.items
         ?? data?.items
         ?? (Array.isArray(data?.data) ? data.data : [])
         ?? []
-      console.log(`  SG "${keyword}" p${page}: ${items.length} items`)
+      if (page === 1) console.log(`  SG "${keyword}" p${page}: ${items.length} items (top-level keys: ${Object.keys(data ?? {}).join(',')})`)
+      else console.log(`  SG "${keyword}" p${page}: ${items.length} items`)
       if (!items.length) break
       for (const item of items) {
-        const endTime = item.endTime ?? item.closingDate ?? ''
+        const endTime = item.endTime ?? item.closingDate ?? item.endDate ?? ''
         if (isExpired(endTime)) continue
-        const bid = parseFloat(item.currentPrice ?? item.minimumBid ?? 0)
+        const bid = parseFloat(item.currentPrice ?? item.currentBid ?? item.minimumBid ?? 0)
         if (bid > maxPrice) continue
         results.push({
-          title: item.title ?? '',
+          title: item.title ?? item.itemTitle ?? item.name ?? '',
           current_bid: bid,
           url: `https://shopgoodwill.com/item/${item.itemId}`,
-          image_url: item.imageURL ?? item.galleryURL ?? '',
+          image_url: item.imageURL ?? item.galleryURL ?? item.thumbnailURL ?? '',
           end_time: endTime,
           time_remaining: timeRemaining(endTime),
-          num_bids: parseInt(item.numberOfBids ?? item.numBids ?? 0),
+          num_bids: parseInt(item.numberOfBids ?? item.numBids ?? item.bidCount ?? 0),
           source: 'ShopGoodwill',
           matched_keyword: keyword,
         })
@@ -224,12 +250,14 @@ async function getCTToken(): Promise<string | null> {
   const now = Date.now()
   if (_ctToken && now < _ctTokenExpiry) return _ctToken
 
-  const user = process.env.CTBIDS_USERNAME
-  const pass = process.env.CTBIDS_PASSWORD
+  const user = (process.env.CTBIDS_USERNAME ?? '').trim()
+  const pass = (process.env.CTBIDS_PASSWORD ?? '').trim()
   if (!user || !pass) {
     console.log('No CTBIDS_USERNAME/PASSWORD set — CTBids search disabled.')
     return null
   }
+  // Debug: log redacted credential info to catch whitespace/case issues
+  console.log(`CTBids login attempt: user="${user}" (${user.length} chars), pass length=${pass.length}`)
 
   try {
     const res = await fetch('https://ctbids.com/services/api/v1/buyer/auth/token', {
@@ -241,7 +269,7 @@ async function getCTToken(): Promise<string | null> {
         'Referer': 'https://ctbids.com/',
         'User-Agent': randomUA(),
       },
-      body: JSON.stringify({ data: { username: user, password: pass } }),
+      body: JSON.stringify({ data: { username: user.toLowerCase(), password: pass } }),
       signal: AbortSignal.timeout(15000),
     })
 
