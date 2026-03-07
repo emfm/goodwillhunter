@@ -278,9 +278,8 @@ async function getCTToken(): Promise<string | null> {
 
     const data = await res.json()
 
-    // Admin endpoint returns {access: "...", refresh: "..."} on success
-    // Error: {status:"failed", message:{CBMSW:{message:"..."}, CBMSM:{...}}}
-    const access = data?.access ?? data?.data?.access ?? data?.data?.[0]?.access
+    // Admin endpoint returns: {status:"success", data:{accessToken:"...", refreshToken:"..."}}
+    const access = data?.data?.accessToken ?? data?.accessToken ?? data?.access ?? data?.data?.access
     if (!access) {
       const errMsg = typeof data?.message === 'object'
         ? data.message?.CBMSW?.message ?? JSON.stringify(data.message).slice(0, 120)
