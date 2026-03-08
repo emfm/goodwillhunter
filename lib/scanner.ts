@@ -102,6 +102,7 @@ interface RawItem {
   num_bids: number
   source: 'ShopGoodwill' | 'CTBids'
   matched_keyword: string
+  match_type: 'text' | 'image'
 }
 
 interface ImageAnalysis {
@@ -149,7 +150,7 @@ function isExpired(endTimeStr: string): boolean {
 async function searchShopGoodwill(keyword: string, maxPrice: number, pages: number): Promise<RawItem[]> {
   const results: RawItem[] = []
   // Random cold-start delay so cron runs don't hit at identical timestamps
-  await jitter(500, 4000)
+  await jitter(100, 500)
   // Today's date in M/d/yyyy for closedAuctionEndingDate field
   const d = new Date()
   const todayStr = `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`
@@ -227,9 +228,10 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
           num_bids: parseInt(item.numBids ?? item.numberOfBids ?? 0),
           source: 'ShopGoodwill',
           matched_keyword: keyword,
+          match_type: 'text',
         })
       }
-      await jitter(1200, 3500)
+      await jitter(300, 800)
     } catch (e) {
       console.warn(`ShopGoodwill error (${keyword}):`, e)
       break
@@ -308,7 +310,7 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
 
   const results: RawItem[] = []
   // Random cold-start delay — stagger CTBids from ShopGoodwill requests
-  await jitter(1000, 6000)
+  await jitter(100, 600)
   for (let page = 1; page <= pages; page++) {
     try {
       const res = await fetch('https://sale.ctbids.com/services/api/v1/search/item/search/list', {
@@ -371,9 +373,10 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
           num_bids: parseInt(item.bidCount ?? item.numberOfBids ?? 0),
           source: 'CTBids',
           matched_keyword: keyword,
+          match_type: 'text',
         })
       }
-      await jitter(1200, 3500)
+      await jitter(300, 800)
     } catch (e) {
       console.warn(`CTBids error (${keyword}):`, e)
       break
@@ -553,8 +556,51 @@ function scoreDeal(
   return Math.max(0, Math.min(100, Math.round(score * 10) / 10))
 }
 
+// ── Description generator ────────────────────────────────────────────────────
+// Generates a 1-sentence human-readable description for each item using Claude.
+// Batched so it's one API call per 40 items.
+const DESC_SYSTEM = `You are helping a resale buyer understand auction listings at a glance.
+Given a list of auction item titles, write a single concise sentence (under 20 words) for each that describes what the item is and why it might be collectible or valuable. Be specific — mention the platform, era, format, or condition clues if present in the title.
+Respond ONLY with a JSON array of strings, one per title, same order. No extra text.`
+
+const descCache = new Map<string, string>()
+
+async function generateDescriptionsBatch(titles: string[]): Promise<string[]> {
+  if (!titles.length) return []
+  if (!process.env.ANTHROPIC_API_KEY) return titles.map(() => '')
+  try {
+    const prompt = titles.map((t, i) => `${i + 1}. ${t}`).join('\n')
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY!,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 2048,
+        system: DESC_SYSTEM,
+        messages: [{ role: 'user', content: `Describe these auction items:\n\n${prompt}` }],
+      }),
+      signal: AbortSignal.timeout(25000),
+    })
+    if (!res.ok) return titles.map(() => '')
+    const data = await res.json()
+    const text = data.content?.[0]?.text ?? '[]'
+    const clean = text.replace(/```json|```/g, '').trim()
+    const arr = JSON.parse(clean)
+    return Array.isArray(arr) ? arr.map(String) : titles.map(() => '')
+  } catch (e) {
+    console.warn('Description generation error:', e)
+    return titles.map(() => '')
+  }
+}
+
 // ── Main scan ─────────────────────────────────────────────────────────────────
-function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)) }
+// NOTE: Scoring is intentionally bypassed — all found items are stored as deals
+// with deal_score=100 so everything shows in the UI. Re-enable scoring once
+// the pipeline is confirmed working end-to-end.
 
 export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[]> {
   const seen = new Set<string>()
@@ -574,60 +620,46 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
         if (!seen.has(item.url)) { seen.add(item.url); rawItems.push(item) }
       }
     }
-    await jitter(2000, 5000)
+    await jitter(500, 1200)
   }
 
-  console.log(`Found ${rawItems.length} unique items`)
-  console.log(`  SG: ${rawItems.filter(i => i.source === 'ShopGoodwill').length} | CTBids: ${rawItems.filter(i => i.source === 'CTBids').length}`)
-  if (rawItems.length > 0) {
-    console.log(`  Sample: "${rawItems[0].title}" $${rawItems[0].current_bid} [${rawItems[0].source}]`)
-  }
-  const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[] = []
+  const sgCount = rawItems.filter(i => i.source === 'ShopGoodwill').length
+  const ctCount = rawItems.filter(i => i.source === 'CTBids').length
+  console.log(`Raw items found: ${rawItems.length} total | SG: ${sgCount} | CTBids: ${ctCount}`)
 
-  // Filter out obviously bad items first
-  const candidates = rawItems.filter(item => item.title && item.current_bid > 0)
+  // Only skip items with no title
+  const candidates = rawItems.filter(item => item.title?.trim())
+  console.log(`Candidates after basic filter: ${candidates.length}`)
 
-  // Batch value estimation — one Claude call per 30 items (fast + cheap with Haiku)
-  const BATCH_SIZE = 30
-  const valueMap = new Map<string, { value: number; source: string }>()
-  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
-    const batch = candidates.slice(i, i + BATCH_SIZE)
-    const uncached = batch.filter(item => !valueCache.has(item.title))
+  // ── Generate descriptions in batches ────────────────────────────────────────
+  const DESC_BATCH = 40
+  const descMap = new Map<string, string>()
+  for (let i = 0; i < candidates.length; i += DESC_BATCH) {
+    const batch = candidates.slice(i, i + DESC_BATCH)
+    const uncached = batch.filter(item => !descCache.has(item.title))
     if (uncached.length > 0) {
-      console.log(`Estimating values for batch of ${uncached.length} items...`)
-      const results = await estimateValueBatch(uncached.map(item => item.title))
+      console.log(`Generating descriptions for ${uncached.length} items (batch ${Math.floor(i/DESC_BATCH)+1})...`)
+      const descs = await generateDescriptionsBatch(uncached.map(item => item.title))
       uncached.forEach((item, idx) => {
-        valueCache.set(item.title, results[idx] ?? { value: 0, source: '' })
+        descCache.set(item.title, descs[idx] ?? '')
       })
     }
     batch.forEach(item => {
-      valueMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' })
+      descMap.set(item.url, descCache.get(item.title) ?? '')
     })
   }
 
+  // ── Build deals — NO score filtering, everything is stored ─────────────────
+  const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[] = []
+
   for (const item of candidates) {
-    const { value: estVal, source: valSrc } = valueMap.get(item.url) ?? { value: 0, source: '' }
-    if (estVal <= 0) continue
-    if (estVal / item.current_bid < config.min_value_ratio * 0.65) continue
-
-    let img: ImageAnalysis | null = null
-    if (config.analyze_images && item.image_url) {
-      img = await analyzeImage(item.image_url, item.title)
-      if (img && img.is_authentic === false && !config.include_suspected_fakes) continue
-    }
-
-    const score = scoreDeal(item, estVal, img, config)
-    if (score < config.min_deal_score) continue
-
-    const adjVal = estVal * (img?.value_multiplier ?? 1)
-    if (adjVal / item.current_bid < config.min_value_ratio) continue
-
+    const description = descMap.get(item.url) ?? null
     deals.push({
       title: item.title,
       current_bid: item.current_bid,
-      estimated_value: estVal,
-      adjusted_value: Math.round(adjVal * 100) / 100,
-      deal_score: score,
+      estimated_value: 0,
+      adjusted_value: 0,
+      deal_score: 100,          // ← Everything is 🔥 until scoring is re-enabled
       url: item.url,
       image_url: item.image_url,
       source: item.source,
@@ -636,19 +668,22 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       num_bids: item.num_bids,
       category: categorize(item.title),
       matched_keyword: item.matched_keyword,
-      value_source: valSrc,
-      condition: img?.condition ?? null,
-      condition_score: img?.condition_score ?? null,
-      completeness: img?.completeness ?? null,
-      is_authentic: img?.is_authentic ?? null,
-      value_multiplier: img?.value_multiplier ?? 1,
-      flags: img?.flags ?? [],
-      positives: img?.positives ?? [],
-      img_summary: img?.summary ?? null,
+      match_type: item.match_type,
+      description,
+      value_source: '',
+      condition: null,
+      condition_score: null,
+      completeness: null,
+      is_authentic: null,
+      value_multiplier: 1,
+      flags: [],
+      positives: [],
+      img_summary: null,
     })
 
-    console.log(`DEAL [${score}] $${item.current_bid} → $${adjVal.toFixed(2)}: ${item.title.slice(0, 50)}`)
+    console.log(`ITEM $${item.current_bid} [${item.source}] [${item.match_type}]: ${item.title.slice(0, 60)}`)
   }
 
-  return deals.sort((a, b) => b.deal_score - a.deal_score)
+  console.log(`=== Stored ${deals.length} items to DB ===`)
+  return deals
 }
