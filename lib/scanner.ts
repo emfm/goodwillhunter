@@ -236,10 +236,15 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
     })
   }
 
-  // All pages fire simultaneously
-  const pageNums = Array.from({ length: pages }, (_, i) => i + 1)
-  const pageResults = await Promise.all(pageNums.map(fetchPage))
-  return pageResults.flat()
+  // Pages are sequential — parallel page fetches look like a scraper
+  const results: RawItem[] = []
+  for (let p = 1; p <= pages; p++) {
+    const pageItems = await fetchPage(p)
+    results.push(...pageItems)
+    if (pageItems.length < 40) break  // no more pages
+    if (p < pages) await jitter(500, 1000)
+  }
+  return results
 }
 
 // ── CTBids auth ───────────────────────────────────────────────────────────────
@@ -324,7 +329,7 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
           { field: 'title',       value: keyword,   op: 'LIKE', join: 'AND' },
         ],
       }),
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(25000),
     })
     if (!searchRes.ok) { console.warn(`  [CT] HTTP ${searchRes.status} "${keyword}" p${page}`); return [] }
     const searchData = await searchRes.json()
@@ -340,7 +345,7 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
         method: 'POST',
         headers: browserHeaders('ctbids'),
         body: JSON.stringify({ data: { itemIds: ids } }),
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(20000),
       })
       if (bidRes.ok) {
         const bidData = await bidRes.json()
@@ -364,9 +369,14 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
     })
   }
 
-  const pageNums = Array.from({ length: pages }, (_, i) => i + 1)
-  const pageResults = await Promise.all(pageNums.map(fetchPage))
-  return pageResults.flat()
+  const results: RawItem[] = []
+  for (let p = 1; p <= pages; p++) {
+    const pageItems = await fetchPage(p)
+    results.push(...pageItems)
+    if (pageItems.length < 40) break
+    if (p < pages) await jitter(500, 1000)
+  }
+  return results
 }
 
 // ── Value estimator (Claude-powered) ─────────────────────────────────────────
@@ -546,55 +556,49 @@ function scoreDeal(
 }
 
 // ── Main scan ─────────────────────────────────────────────────────────────────
-// Time budget for Vercel Pro (300s hard limit):
-//   Crawl:           ≤ 60s   (SG + CTBids, 200–500ms between keywords)
-//   Value estimation:≤ 30s   (Claude Haiku, 20-title batches, sequential)
-//   Image analysis:  ≤ 120s  (Claude Sonnet, parallel 5, TOP 40 only)
-//   Overhead/buffer: ≤ 30s
-//   Total target:    ≤ 240s  (60s headroom vs 300s hard limit)
-const MAX_IMAGE_CANDIDATES = 40   // only analyze the most promising items
-const CRAWL_JITTER_MIN = 200      // ms between keyword requests — polite but not slow
-const CRAWL_JITTER_MAX = 500
+// CRAWL is fully sequential — one keyword at a time, one source at a time.
+// This is intentional: SG and CTBids will ban you for burst traffic.
+// Everything AFTER the crawl (value estimation, image analysis) is fully
+// parallel since it only hits Anthropic's API, not the auction sites.
+const MAX_IMAGE_CANDIDATES = 40
 
 export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[]> {
   const seen = new Set<string>()
   const rawItems: RawItem[] = []
   const scanStart = Date.now()
 
-  // ── Phase 1: Crawl — ALL keywords in parallel ────────────────────────────────
-  // Each keyword fires SG + CTBids simultaneously. All keywords fire simultaneously.
-  // 10 keywords sequential = ~58s. 10 keywords parallel = ~6s.
+  // ── Phase 1: Crawl — sequential, polite ───────────────────────────────────
   const totalKeywords = config.keywords.length
-  setScanStatus({ phase: 'crawling_sg', message: 'Scanning all keywords…', detail: `${totalKeywords} keywords × 2 sources in parallel`, progress: 5, keywordsTotal: totalKeywords, keywordsDone: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null })
+  setScanStatus({ phase: 'crawling_sg', message: 'Scanning keywords…', detail: `0 / ${totalKeywords} keywords`, progress: 5, keywordsTotal: totalKeywords, keywordsDone: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null })
 
-  let keywordsDone = 0
-  // Stagger keyword starts by 0–800ms so we don't hit both sites with
-  // 10 simultaneous identical-structure requests from one IP at t=0.
-  const allResults = await Promise.all(config.keywords.map(async (kw, kwIdx) => {
-    await jitter(kwIdx * 80, kwIdx * 80 + 300)  // 0ms, 80–380ms, 160–460ms … staggered
-    const kwItems: RawItem[] = []
-    await Promise.all([
-      config.sources.includes('shopgoodwill')
-        ? searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
-            .then(items => { kwItems.push(...items); console.log(`  [SG] "${kw}": ${items.length}`) })
-            .catch(e => console.error(`  [SG] "${kw}" ERROR:`, e))
-        : Promise.resolve(),
-      config.sources.includes('ctbids')
-        ? searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
-            .then(items => { kwItems.push(...items); console.log(`  [CT] "${kw}": ${items.length}`) })
-            .catch(e => console.error(`  [CT] "${kw}" ERROR:`, e))
-        : Promise.resolve(),
-    ])
-    keywordsDone++
-    setScanStatus({ keywordsDone, progress: Math.round(5 + (keywordsDone / totalKeywords) * 35) })
-    return kwItems
-  }))
+  for (let kwIdx = 0; kwIdx < config.keywords.length; kwIdx++) {
+    const kw = config.keywords[kwIdx]
+    const pct = Math.round(5 + (kwIdx / totalKeywords) * 35)
 
-  // Merge, dedupe by URL
-  for (const kwItems of allResults) {
-    for (const item of kwItems) {
-      if (!seen.has(item.url)) { seen.add(item.url); rawItems.push(item) }
+    if (config.sources.includes('shopgoodwill')) {
+      setScanStatus({ phase: 'crawling_sg', message: `ShopGoodwill: "${kw}"`, detail: `keyword ${kwIdx + 1} / ${totalKeywords}`, currentKeyword: kw, keywordsDone: kwIdx, progress: pct })
+      try {
+        const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
+        const fresh = items.filter(i => !seen.has(i.url))
+        fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
+        console.log(`  [SG] "${kw}": ${items.length} (${fresh.length} new)`)
+      } catch (e) { console.error(`  [SG] "${kw}" ERROR:`, e) }
+      await jitter(400, 900)  // pause between SG and CTBids for same keyword
     }
+
+    if (config.sources.includes('ctbids')) {
+      setScanStatus({ phase: 'crawling_ct', message: `CTBids: "${kw}"`, detail: `keyword ${kwIdx + 1} / ${totalKeywords}`, currentKeyword: kw, keywordsDone: kwIdx, progress: pct })
+      try {
+        const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
+        const fresh = items.filter(i => !seen.has(i.url))
+        fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
+        console.log(`  [CT] "${kw}": ${items.length} (${fresh.length} new)`)
+      } catch (e) { console.error(`  [CT] "${kw}" ERROR:`, e) }
+    }
+
+    setScanStatus({ keywordsDone: kwIdx + 1, itemsFound: rawItems.length, sgItems: rawItems.filter(i => i.source === 'ShopGoodwill').length, ctItems: rawItems.filter(i => i.source === 'CTBids').length })
+    // Pause between keywords — looks like a human browsing
+    if (kwIdx < config.keywords.length - 1) await jitter(800, 1800)
   }
 
   const sgCount = rawItems.filter(i => i.source === 'ShopGoodwill').length
