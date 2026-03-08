@@ -59,19 +59,21 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
     <div className="card slide-in overflow-hidden flex flex-col">
       {/* Image */}
       <div className="relative">
+        <a href={deal.url} target="_blank" rel="noopener noreferrer" className="block">
         {deal.image_url ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={deal.image_url}
             alt={deal.title}
-            className="w-full h-44 object-cover"
+            className="w-full h-44 object-cover hover:opacity-90 transition-opacity cursor-pointer"
             onError={e => { (e.target as HTMLImageElement).style.display = 'none' }}
           />
         ) : (
-          <div className="w-full h-44 bg-slate-900 flex items-center justify-center">
+          <div className="w-full h-44 bg-slate-900 flex items-center justify-center hover:bg-slate-800 transition-colors cursor-pointer">
             <span className="text-slate-600 text-4xl">📦</span>
           </div>
         )}
+        </a>
         {/* Score overlay */}
         <div className="absolute top-2 right-2">
           <div className={`text-xs font-black px-2 py-1 rounded-full ${
@@ -106,7 +108,9 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
             <CondBadge cond={deal.condition} />
             <span className="text-xs text-slate-500">{deal.category}</span>
           </div>
-          <h3 className="text-sm font-semibold text-slate-200 line-clamp-2 leading-snug">{deal.title}</h3>
+          <a href={deal.url} target="_blank" rel="noopener noreferrer" className="hover:text-sky-300 transition-colors">
+            <h3 className="text-sm font-semibold text-slate-200 line-clamp-2 leading-snug">{deal.title}</h3>
+          </a>
         </div>
 
         {/* Stats grid */}
@@ -214,6 +218,10 @@ export default function Dashboard() {
   const [minScore, setMinScore] = useState(0)
   const [showDismissed, setShowDismissed] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+  const [kwInput, setKwInput] = useState('')
+  const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
+  const [kwOpen, setKwOpen] = useState(false)
+  const [sortBy, setSortBy] = useState<'score' | 'price_asc' | 'price_desc' | 'ending'>('score')
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -257,7 +265,13 @@ export default function Dashboard() {
       if (!secret) { setScanning(false); return }
       const res = await fetch('/api/scan', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${secret}` },
+        headers: {
+          'Authorization': `Bearer ${secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: overrideKeywords.length
+          ? JSON.stringify({ keywords: overrideKeywords })
+          : undefined,
       })
       const data = await res.json()
       showToast(`✅ Scan complete — ${data.count ?? 0} deals found`)
@@ -271,6 +285,18 @@ export default function Dashboard() {
   }
 
   const activeBidded = deals.filter(d => d.bidded && !d.dismissed).length
+
+  const sortedDeals = [...deals].sort((a, b) => {
+    if (sortBy === 'score')      return b.deal_score - a.deal_score
+    if (sortBy === 'price_asc')  return a.current_bid - b.current_bid
+    if (sortBy === 'price_desc') return b.current_bid - a.current_bid
+    if (sortBy === 'ending') {
+      const tA = new Date(a.end_time).getTime()
+      const tB = new Date(b.end_time).getTime()
+      return tA - tB
+    }
+    return 0
+  })
   const hotDeals = deals.filter(d => d.deal_score >= 70 && !d.dismissed).length
   const avgScore = deals.length ? Math.round(deals.reduce((s, d) => s + d.deal_score, 0) / deals.length) : 0
 
@@ -331,6 +357,82 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {/* Keyword override panel */}
+      <div className="border-b" style={{ borderColor: 'var(--border2)', background: 'var(--surface)' }}>
+        <div className="max-w-7xl mx-auto px-4">
+          <button
+            onClick={() => setKwOpen(o => !o)}
+            className="w-full flex items-center justify-between py-2.5 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <span className="flex items-center gap-2">
+              🔍 <span>Keyword overrides</span>
+              {overrideKeywords.length > 0 && (
+                <span className="bg-sky-900 text-sky-300 border border-sky-700 px-2 py-0.5 rounded-full text-xs font-bold">
+                  {overrideKeywords.length} active
+                </span>
+              )}
+              {overrideKeywords.length === 0 && (
+                <span className="text-slate-600">— using saved config keywords</span>
+              )}
+            </span>
+            <span className="text-slate-600">{kwOpen ? '▲' : '▼'}</span>
+          </button>
+
+          {kwOpen && (
+            <div className="pb-3 flex flex-col gap-2">
+              <div className="flex flex-wrap gap-1.5">
+                {overrideKeywords.map(kw => (
+                  <span key={kw} className="inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-full bg-sky-950 text-sky-300 border border-sky-800 font-medium">
+                    {kw}
+                    <button
+                      onClick={() => setOverrideKeywords(prev => prev.filter(k => k !== kw))}
+                      className="text-sky-600 hover:text-red-400 transition-colors leading-none ml-0.5"
+                    >×</button>
+                  </span>
+                ))}
+                {overrideKeywords.length === 0 && (
+                  <span className="text-xs text-slate-600 italic">No overrides — next scan uses your saved keywords</span>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <input
+                  value={kwInput}
+                  onChange={e => setKwInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ',') {
+                      e.preventDefault()
+                      const v = kwInput.trim().toLowerCase()
+                      if (v && !overrideKeywords.includes(v)) setOverrideKeywords(prev => [...prev, v])
+                      setKwInput('')
+                    }
+                  }}
+                  placeholder="Type keyword, press Enter to add…"
+                  className="flex-1 text-xs px-3 py-1.5 rounded-md border"
+                  style={{ background: '#0f172a', borderColor: 'var(--border2)', color: '#e2e8f0', outline: 'none' }}
+                />
+                <button
+                  onClick={() => {
+                    const v = kwInput.trim().toLowerCase()
+                    if (v && !overrideKeywords.includes(v)) setOverrideKeywords(prev => [...prev, v])
+                    setKwInput('')
+                  }}
+                  className="btn btn-ghost text-xs px-3"
+                >+ Add</button>
+                {overrideKeywords.length > 0 && (
+                  <button
+                    onClick={() => setOverrideKeywords([])}
+                    className="text-xs px-3 py-1.5 rounded-md text-red-500 hover:text-red-300 hover:bg-red-950/30 transition-colors border border-transparent hover:border-red-900"
+                  >✕ Clear all</button>
+                )}
+              </div>
+              <p className="text-xs text-slate-600">
+                These keywords replace your saved config for the next scan only. Comma or Enter to add.
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Filters */}
       <div className="border-b" style={{ borderColor: 'var(--border2)', background: 'var(--surface)' }}>
         <div className="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
@@ -362,6 +464,20 @@ export default function Dashboard() {
             Show dismissed
           </label>
 
+          <div className="flex gap-1 ml-auto items-center">
+            <span className="text-xs text-slate-600 mr-1">Sort:</span>
+            {([
+              { val: 'score',      label: '🏆 Score' },
+              { val: 'price_asc',  label: '💰 Cheapest' },
+              { val: 'price_desc', label: '💰 Priciest' },
+              { val: 'ending',     label: '⏱ Ending' },
+            ] as const).map(s => (
+              <button key={s.val} onClick={() => setSortBy(s.val)}
+                className={`text-xs px-2.5 py-1.5 rounded-md font-semibold transition-all ${
+                  sortBy === s.val ? 'bg-sky-900 text-sky-300 border border-sky-700' : 'text-slate-500 hover:text-slate-300'
+                }`}>{s.label}</button>
+            ))}
+          </div>
           <button onClick={loadDeals} className="btn btn-ghost text-xs py-1.5 px-3">↻ Refresh</button>
         </div>
       </div>
@@ -384,7 +500,7 @@ export default function Dashboard() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {deals.map(deal => (
+            {sortedDeals.map(deal => (
               <DealCard
                 key={deal.id}
                 deal={deal}
