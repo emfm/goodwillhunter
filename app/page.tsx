@@ -75,10 +75,11 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
         {/* Score overlay */}
         <div className="absolute top-2 right-2">
           <div className={`text-xs font-black px-2 py-1 rounded-full ${
+            deal.deal_score === 100 ? 'bg-orange-500 text-black' :
             deal.deal_score >= 80 ? 'bg-green-500 text-black' :
             deal.deal_score >= 60 ? 'bg-amber-500 text-black' : 'bg-slate-700 text-white'
           }`}>
-            {deal.deal_score}
+            {deal.deal_score === 100 ? '🔥' : deal.deal_score}
           </div>
         </div>
         {/* Source badge */}
@@ -134,7 +135,26 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
           <span className="truncate max-w-[120px]">{deal.value_source?.split('(')[0]}</span>
         </div>
 
-        {/* AI analysis (expandable) */}
+        {/* Description */}
+        {deal.description && (
+          <p className="text-xs text-slate-400 leading-relaxed border-l-2 border-slate-700 pl-2">
+            {deal.description}
+          </p>
+        )}
+
+        {/* Match type + AI analysis */}
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={`text-xs px-2 py-0.5 rounded-full border font-semibold ${
+            deal.match_type === 'image'
+              ? 'bg-purple-950 text-purple-300 border-purple-800'
+              : 'bg-slate-900 text-slate-400 border-slate-700'
+          }`}>
+            {deal.match_type === 'image' ? '🔍 Image match' : '🔤 Text match'}
+          </span>
+          <span className="text-xs text-slate-600">via "{deal.matched_keyword}"</span>
+        </div>
+
+        {/* AI image analysis (expandable, shown if available) */}
         {deal.img_summary && (
           <div className="border border-sky-900/40 rounded-lg overflow-hidden">
             <button
