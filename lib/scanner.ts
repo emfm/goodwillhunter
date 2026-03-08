@@ -1,5 +1,6 @@
 import { AppConfig, Deal } from './types'
 import { setScanStatus } from './scan-status-store'
+import { isStopRequested, resetStopFlag } from '../app/api/scan/stop/route'
 import { createCipheriv } from 'crypto'
 
 // ── Stealth helpers ───────────────────────────────────────────────────────────
@@ -705,6 +706,7 @@ function scoreDeal(
 const MAX_IMAGE_CANDIDATES = 40
 
 export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[]> {
+  resetStopFlag()
   const seen = new Set<string>()
   const rawItems: RawItem[] = []
   const scanStart = Date.now()
@@ -739,6 +741,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     }
 
     setScanStatus({ keywordsDone: kwIdx + 1, itemsFound: rawItems.length, sgItems: rawItems.filter(i => i.source === 'ShopGoodwill').length, ctItems: rawItems.filter(i => i.source === 'CTBids').length })
+    if (isStopRequested()) { console.log('[SCAN] Stopped after keyword', kwIdx + 1); break }
     // Pause between keywords — looks like a human browsing
     if (kwIdx < config.keywords.length - 1) await jitter(800, 1800)
   }
@@ -829,6 +832,8 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   prescored.sort((a, b) => b.prescore - a.prescore)
   const imgCandidates = prescored.slice(0, MAX_IMAGE_CANDIDATES).map(p => p.item)
   console.log(`[SCAN] Image analysis: top ${imgCandidates.length} of ${candidates.length} candidates selected`)
+
+  if (isStopRequested()) { console.log('[SCAN] Stopped before image analysis'); return [] }
 
   // ── Phase 4: Image analysis — parallel batches of 5 ─────────────────────────
   const analyzeImages = config.analyze_images && !!process.env.ANTHROPIC_API_KEY
