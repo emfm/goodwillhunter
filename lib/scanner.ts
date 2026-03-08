@@ -586,84 +586,111 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   const seen = new Set<string>()
   const rawItems: RawItem[] = []
 
-  // ── Crawl sources ──────────────────────────────────────────────────────────
+  // ── Crawl ──────────────────────────────────────────────────────────────────
   for (const kw of config.keywords) {
     console.log(`\n[SCAN] keyword: "${kw}"`)
     if (config.sources.includes('shopgoodwill')) {
       try {
         const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
-        const newItems = items.filter(i => !seen.has(i.url))
-        newItems.forEach(i => { seen.add(i.url); rawItems.push(i) })
-        console.log(`  [SG]     "${kw}" → ${items.length} items (${newItems.length} new)`)
-      } catch (e) {
-        console.error(`  [SG]     "${kw}" THREW:`, e)
-      }
+        const fresh = items.filter(i => !seen.has(i.url))
+        fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
+        console.log(`  [SG]  "${kw}": ${items.length} items (${fresh.length} new)`)
+      } catch (e) { console.error(`  [SG]  "${kw}" ERROR:`, e) }
     }
     if (config.sources.includes('ctbids')) {
       try {
         const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
-        const newItems = items.filter(i => !seen.has(i.url))
-        newItems.forEach(i => { seen.add(i.url); rawItems.push(i) })
-        console.log(`  [CT]     "${kw}" → ${items.length} items (${newItems.length} new)`)
-      } catch (e) {
-        console.error(`  [CT]     "${kw}" THREW:`, e)
-      }
+        const fresh = items.filter(i => !seen.has(i.url))
+        fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
+        console.log(`  [CT]  "${kw}": ${items.length} items (${fresh.length} new)`)
+      } catch (e) { console.error(`  [CT]  "${kw}" ERROR:`, e) }
     }
     await jitter(500, 1200)
   }
 
-  // ── Summary ────────────────────────────────────────────────────────────────
   const sgCount = rawItems.filter(i => i.source === 'ShopGoodwill').length
   const ctCount = rawItems.filter(i => i.source === 'CTBids').length
-  console.log(`\n[SCAN] ── Crawl complete ──────────────────────────────`)
-  console.log(`[SCAN]   Total unique items : ${rawItems.length}`)
-  console.log(`[SCAN]   ShopGoodwill       : ${sgCount}`)
-  console.log(`[SCAN]   CTBids             : ${ctCount}`)
+  console.log(`\n[SCAN] Crawl complete: ${rawItems.length} total | SG: ${sgCount} | CT: ${ctCount}`)
+  if (!rawItems.length) return []
 
-  if (rawItems.length === 0) {
-    console.log('[SCAN]   ⚠ No items found — check credentials and source toggles')
-    return []
+  const candidates = rawItems.filter(i => i.title?.trim())
+  console.log(`[SCAN] Candidates: ${candidates.length}`)
+
+  // ── Value estimation (batched, 20 per call) ───────────────────────────────
+  console.log('[SCAN] Estimating values...')
+  const VALUE_BATCH = 20
+  const valMap = new Map<string, { value: number; source: string }>()
+  for (let i = 0; i < candidates.length; i += VALUE_BATCH) {
+    const batch = candidates.slice(i, i + VALUE_BATCH)
+    const uncached = batch.filter(item => !valueCache.has(item.title))
+    if (uncached.length > 0) {
+      const results = await estimateValueBatch(uncached.map(item => item.title))
+      uncached.forEach((item, idx) => {
+        valueCache.set(item.title, results[idx] ?? { value: 0, source: '' })
+      })
+    }
+    batch.forEach(item => { valMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' }) })
+  }
+  console.log('[SCAN] Value estimation done')
+
+  // ── Image analysis (parallel batches of 5) ────────────────────────────────
+  const analyzeImages = config.analyze_images && !!process.env.ANTHROPIC_API_KEY
+  const imgMap = new Map<string, ImageAnalysis | null>()
+
+  if (analyzeImages) {
+    console.log(`[SCAN] Analyzing images for ${candidates.length} items (parallel batches of 5)...`)
+    const IMG_BATCH = 5
+    for (let i = 0; i < candidates.length; i += IMG_BATCH) {
+      const batch = candidates.slice(i, i + IMG_BATCH)
+      const results = await Promise.all(
+        batch.map(item => analyzeImage(item.image_url, item.title).catch(() => null))
+      )
+      batch.forEach((item, idx) => { imgMap.set(item.url, results[idx] ?? null) })
+      if (i + IMG_BATCH < candidates.length) await jitter(200, 400)
+    }
+    console.log('[SCAN] Image analysis done')
+  } else {
+    console.log('[SCAN] Image analysis skipped (disabled or no API key)')
   }
 
-  if (rawItems.length > 0) {
-    console.log(`[SCAN]   Sample item: "${rawItems[0].title}" $${rawItems[0].current_bid} [${rawItems[0].source}]`)
-  }
-
-  // ── Build deal rows (no scoring, no filtering — store everything) ──────────
-  const candidates = rawItems.filter(item => item.title?.trim())
-  console.log(`[SCAN]   Candidates (has title): ${candidates.length}`)
-
+  // ── Build deal rows ────────────────────────────────────────────────────────
   const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[] = []
 
   for (const item of candidates) {
+    const { value: estVal, source: valSource } = valMap.get(item.url) ?? { value: 0, source: '' }
+    const img = imgMap.get(item.url) ?? null
+    const adjValue = Math.round(estVal * (img?.value_multiplier ?? 1) * 100) / 100
+    const score = scoreDeal(item, estVal, img, config)
+
     deals.push({
-      title: item.title,
-      current_bid: item.current_bid,
-      estimated_value: 0,
-      adjusted_value: 0,
-      deal_score: 100,
-      url: item.url,
-      image_url: item.image_url,
-      source: item.source,
-      end_time: item.end_time,
-      time_remaining: item.time_remaining,
-      num_bids: item.num_bids,
-      category: categorize(item.title),
+      title:           item.title,
+      current_bid:     item.current_bid,
+      estimated_value: estVal,
+      adjusted_value:  adjValue,
+      deal_score:      score,
+      url:             item.url,
+      image_url:       item.image_url,
+      source:          item.source,
+      end_time:        item.end_time,
+      time_remaining:  item.time_remaining,
+      num_bids:        item.num_bids,
+      category:        categorize(item.title),
       matched_keyword: item.matched_keyword,
-      match_type: item.match_type,   // needs migration.sql to have run
-      description: null,             // needs migration.sql to have run
-      value_source: '',
-      condition: null,
-      condition_score: null,
-      completeness: null,
-      is_authentic: null,
-      value_multiplier: 1,
-      flags: [],
-      positives: [],
-      img_summary: null,
+      match_type:      item.match_type,
+      description:     null,
+      value_source:    valSource,
+      condition:       img?.condition ?? null,
+      condition_score: img?.condition_score ?? null,
+      completeness:    img?.completeness ?? null,
+      is_authentic:    img?.is_authentic ?? null,
+      value_multiplier: img?.value_multiplier ?? 1,
+      flags:           img?.flags ?? [],
+      positives:       img?.positives ?? [],
+      img_summary:     img?.summary ?? null,
     })
   }
 
-  console.log(`[SCAN] ── Returning ${deals.length} deals to route ──────`)
+  const withScore = deals.filter(d => d.deal_score > 0).length
+  console.log(`[SCAN] Built ${deals.length} deals (${withScore} with real score, ${deals.length - withScore} unscored)`)
   return deals
 }
