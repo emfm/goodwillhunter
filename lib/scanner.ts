@@ -312,84 +312,102 @@ async function getCTToken(): Promise<string | null> {
 
 // ── CTBids ────────────────────────────────────────────────────────────────────
 async function searchCTBids(keyword: string, maxPrice: number, pages: number): Promise<RawItem[]> {
-  const token = await getCTToken()
-  if (!token) return []
+  // CTBids uses two fully public (no auth) endpoints:
+  // 1. POST sale.ctbids.com/services/api/v1/search/item/new/list — Elasticsearch filter, returns item metadata
+  // 2. POST ctbids.com/services/api/v1/buyer/auction/item/current/bid — batch bid prices by item ID
+  // No login or token needed for either.
+  const allItems: RawItem[] = []
+  await jitter(100, 500)
 
-  const results: RawItem[] = []
-  // Random cold-start delay — stagger CTBids from ShopGoodwill requests
-  await jitter(100, 600)
   for (let page = 1; page <= pages; page++) {
     try {
-      const res = await fetch('https://sale.ctbids.com/services/api/v1/search/item/search/list', {
+      // Step 1: search for items by keyword
+      const searchRes = await fetch('https://sale.ctbids.com/services/api/v1/search/item/new/list', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
-          'Authorization': `Bearer ${token}`,
           'Origin': 'https://ctbids.com',
           'Referer': 'https://ctbids.com/',
           'User-Agent': randomUA(),
         },
         body: JSON.stringify({
-          keyword,
-          pageNumber: page,
-          pageSize: 40,
-          sortOrder: 'ClosingDateASC',
+          sort: [{ field: 'itemclosetime', direction: 'asc' }],
+          page: { size: 40, number: page },
+          field: ['id', 'title', 'itemclosetime', 'displayimageurl', 'thumbnailurl',
+                  'itemseourl', 'saleid', 'city', 'state', 'isshippable', 'category', 'categoryGroup'],
+          filter: [
+            { field: 'salestatus', value: 'Started', op: '=', join: 'AND' },
+            { field: 'itemstatus',  value: 'Ready',   op: '=', join: 'AND' },
+            { field: 'title',       value: keyword,   op: 'LIKE', join: 'AND' },
+          ],
         }),
         signal: AbortSignal.timeout(12000),
       })
 
-      if (!res.ok) {
-        console.warn(`CTBids search HTTP ${res.status} for "${keyword}" p${page}`)
-        if (res.status === 401) { _ctToken = null }
+      if (!searchRes.ok) {
+        console.warn(`  [CT] search HTTP ${searchRes.status} for "${keyword}" p${page}`)
         break
       }
-
-      const data = await res.json()
-      if (data?.status === 'failed') {
-        console.warn(`CTBids search failed: ${data.message}`)
-        if (data.message?.includes('Invalid') || data.message?.includes('expired')) {
-          _ctToken = null
-        }
-        break
-      }
-
-      // Response may be wrapped: {data: [...]} or {data: {itemList: [...]}} etc.
-      const items: any[] = data?.data?.itemList
-        ?? data?.data?.items
-        ?? data?.data
-        ?? data?.itemList
-        ?? data?.items
-        ?? []
-
-      console.log(`  CTBids "${keyword}" p${page}: ${items.length} items`)
+      const searchData = await searchRes.json()
+      const items: any[] = searchData?.data ?? []
+      console.log(`  [CT] "${keyword}" p${page}: ${items.length} items`)
       if (!items.length) break
 
+      // Step 2: batch fetch current bid prices
+      const ids: number[] = items.map((i: any) => i.id)
+      let bidMap: Record<number, { bid: number; bidCount: number }> = {}
+      try {
+        const bidRes = await fetch('https://ctbids.com/services/api/v1/buyer/auction/item/current/bid', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'Origin': 'https://ctbids.com',
+            'User-Agent': randomUA(),
+          },
+          body: JSON.stringify({ data: { itemIds: ids } }),
+          signal: AbortSignal.timeout(10000),
+        })
+        if (bidRes.ok) {
+          const bidData = await bidRes.json()
+          for (const b of (bidData?.data ?? [])) {
+            bidMap[b.itemid] = { bid: parseFloat(b.bidprice ?? 0), bidCount: parseInt(b.bidcount ?? b.bidcount ?? 0) }
+          }
+        }
+      } catch (e) {
+        console.warn(`  [CT] bid fetch error for "${keyword}":`, e)
+      }
+
+      // Step 3: combine
       for (const item of items) {
-        const endTime = (item.closingDate ?? item.closingTime ?? item.endDate ?? '').slice(0, 19)
+        const endTime = (item.itemclosetime ?? '').replace(' ', 'T')
         if (isExpired(endTime)) continue
-        const bid = parseFloat(item.currentBid ?? item.currentPrice ?? item.startBid ?? 0)
+        const { bid = 0, bidCount = 0 } = bidMap[item.id] ?? {}
         if (bid > maxPrice) continue
-        results.push({
-          title: item.title ?? item.name ?? item.itemName ?? '',
+        const seoUrl = item.itemseourl ?? ''
+        allItems.push({
+          title: item.title ?? '',
           current_bid: bid,
-          url: `https://www.ctbids.com/#!/item/detail/${item.itemId ?? item.id}`,
-          image_url: item.imageURL ?? item.thumbnailURL ?? item.primaryImage ?? '',
+          url: `https://www.ctbids.com/#!/estate-sale/${item.saleid}/item/${item.id}/${seoUrl}`,
+          image_url: item.displayimageurl ?? item.thumbnailurl ?? '',
           end_time: endTime,
           time_remaining: timeRemaining(endTime),
-          num_bids: parseInt(item.bidCount ?? item.numberOfBids ?? 0),
+          num_bids: bidCount,
           source: 'CTBids',
           matched_keyword: keyword,
           match_type: 'text',
         })
       }
+
+      if (items.length < 40) break  // no more pages
       await jitter(300, 800)
     } catch (e) {
-      console.warn(`CTBids error (${keyword}):`, e)
+      console.warn(`  [CT] error (${keyword}):`, e)
       break
     }
   }
-  return results
+  return allItems
 }
 
 // ── Value estimator (Claude-powered) ─────────────────────────────────────────
