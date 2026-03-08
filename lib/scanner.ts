@@ -312,54 +312,81 @@ async function getCTToken(): Promise<string | null> {
 
 // ── CTBids ────────────────────────────────────────────────────────────────────
 async function searchCTBids(keyword: string, maxPrice: number, pages: number): Promise<RawItem[]> {
-  // CTBids: two public endpoints — search + bid prices.
-  // Fire all pages simultaneously; for each page fire search + bid fetch simultaneously.
+  // Helper: fetch with one automatic retry on timeout/5xx
+  const fetchWithRetry = async (url: string, opts: RequestInit, tag: string): Promise<Response | null> => {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const res = await fetch(url, opts)
+        if (res.ok) return res
+        const body = await res.text().catch(() => '')
+        console.warn(`  [CT] ${tag} HTTP ${res.status} (attempt ${attempt}): ${body.slice(0, 120)}`)
+        if (res.status < 500) return res  // 4xx — don't retry
+        await jitter(1500, 2500)
+      } catch (e: any) {
+        console.warn(`  [CT] ${tag} attempt ${attempt} error: ${e?.message ?? e}`)
+        if (attempt < 2) await jitter(2000, 3000)
+      }
+    }
+    return null
+  }
+
   const fetchPage = async (page: number): Promise<RawItem[]> => {
-    const searchRes = await fetch('https://sale.ctbids.com/services/api/v1/search/item/new/list', {
-      method: 'POST',
-      headers: browserHeaders('ctbids'),
-      body: JSON.stringify({
-        sort: [{ field: 'itemclosetime', direction: 'asc' }],
-        page: { size: 40, number: page },
-        field: ['id', 'title', 'itemclosetime', 'displayimageurl', 'thumbnailurl',
-                'itemseourl', 'saleid', 'city', 'state', 'isshippable', 'category', 'categoryGroup'],
-        filter: [
-          { field: 'salestatus', value: 'Started', op: '=', join: 'AND' },
-          { field: 'itemstatus',  value: 'Ready',   op: '=', join: 'AND' },
-          { field: 'title',       value: keyword,   op: 'LIKE', join: 'AND' },
-        ],
-      }),
-      signal: AbortSignal.timeout(25000),
-    })
-    if (!searchRes.ok) { console.warn(`  [CT] HTTP ${searchRes.status} "${keyword}" p${page}`); return [] }
-    const searchData = await searchRes.json()
+    const searchRes = await fetchWithRetry(
+      'https://sale.ctbids.com/services/api/v1/search/item/new/list',
+      {
+        method: 'POST',
+        headers: browserHeaders('ctbids'),
+        body: JSON.stringify({
+          sort: [{ field: 'itemclosetime', direction: 'asc' }],
+          page: { size: 40, number: page },
+          field: ['id', 'title', 'itemclosetime', 'displayimageurl', 'thumbnailurl',
+                  'itemseourl', 'saleid', 'city', 'state', 'isshippable', 'category', 'categoryGroup'],
+          filter: [
+            { field: 'salestatus', value: 'Started', op: '=', join: 'AND' },
+            { field: 'itemstatus',  value: 'Ready',   op: '=', join: 'AND' },
+            { field: 'title',       value: keyword,   op: 'LIKE', join: 'AND' },
+          ],
+        }),
+        signal: AbortSignal.timeout(25000),
+      },
+      `search "${keyword}" p${page}`
+    )
+    if (!searchRes) return []
+
+    const searchData = await searchRes.json().catch(() => null)
+    if (!searchData) { console.warn(`  [CT] bad JSON for "${keyword}" p${page}`); return [] }
+
     const items: any[] = searchData?.data ?? []
-    console.log(`  [CT] "${keyword}" p${page}: ${items.length} items`)
+    console.log(`  [CT] "${keyword}" p${page}: ${items.length} raw items (status: ${searchData?.status})`)
     if (!items.length) return []
 
-    // Fetch bid prices in parallel with nothing (just await it here, search already done)
+    // Bid prices
     const ids: number[] = items.map((i: any) => i.id)
     let bidMap: Record<number, { bid: number; bidCount: number }> = {}
-    try {
-      const bidRes = await fetch('https://ctbids.com/services/api/v1/buyer/auction/item/current/bid', {
+    const bidRes = await fetchWithRetry(
+      'https://ctbids.com/services/api/v1/buyer/auction/item/current/bid',
+      {
         method: 'POST',
         headers: browserHeaders('ctbids'),
         body: JSON.stringify({ data: { itemIds: ids } }),
         signal: AbortSignal.timeout(20000),
-      })
-      if (bidRes.ok) {
-        const bidData = await bidRes.json()
-        for (const b of (bidData?.data ?? [])) {
-          bidMap[b.itemid] = { bid: parseFloat(b.bidprice ?? 0), bidCount: parseInt(b.bidcount ?? 0) }
-        }
+      },
+      `bids "${keyword}" p${page}`
+    )
+    if (bidRes) {
+      const bidData = await bidRes.json().catch(() => null)
+      for (const b of (bidData?.data ?? [])) {
+        bidMap[b.itemid] = { bid: parseFloat(b.bidprice ?? 0), bidCount: parseInt(b.bidcount ?? 0) }
       }
-    } catch (e) { console.warn(`  [CT] bid error "${keyword}" p${page}:`, e) }
+      console.log(`  [CT] "${keyword}" p${page}: got ${Object.keys(bidMap).length} bid prices`)
+    }
 
-    return items.flatMap(item => {
+    let expiredCount = 0, overPriceCount = 0
+    const kept = items.flatMap(item => {
       const endTime = (item.itemclosetime ?? '').replace(' ', 'T')
-      if (isExpired(endTime)) return []
+      if (isExpired(endTime)) { expiredCount++; return [] }
       const { bid = 0, bidCount = 0 } = bidMap[item.id] ?? {}
-      if (bid > maxPrice) return []
+      if (bid > maxPrice) { overPriceCount++; return [] }
       return [{ title: item.title ?? '', current_bid: bid,
         url: `https://www.ctbids.com/#!/estate-sale/${item.saleid}/item/${item.id}/${item.itemseourl ?? ''}`,
         image_url: item.displayimageurl ?? item.thumbnailurl ?? '',
@@ -367,6 +394,8 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
         num_bids: bidCount, source: 'CTBids' as const,
         matched_keyword: keyword, match_type: 'text' as const }]
     })
+    console.log(`  [CT] "${keyword}" p${page}: ${kept.length} kept (${expiredCount} expired, ${overPriceCount} over $${maxPrice})`)
+    return kept
   }
 
   const results: RawItem[] = []
