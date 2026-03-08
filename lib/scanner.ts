@@ -134,7 +134,14 @@ function timeRemaining(endTimeStr: string): string {
 
 function isExpired(endTimeStr: string): boolean {
   try {
-    return new Date(endTimeStr) < new Date()
+    if (!endTimeStr) return false
+    const end = new Date(endTimeStr)
+    // SG/CTBids return times without timezone — they're US Eastern (UTC-5/4).
+    // Vercel runs UTC, so naive parse makes Eastern times look 4-5h early.
+    // Add a 6h grace window to avoid dropping live auctions due to TZ mismatch.
+    // Items truly ended days ago will still be filtered; closing-today ones won't.
+    const SIX_HOURS = 6 * 60 * 60 * 1000
+    return end.getTime() + SIX_HOURS < Date.now()
   } catch {
     return false
   }
@@ -625,8 +632,8 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       num_bids: item.num_bids,
       category: categorize(item.title),
       matched_keyword: item.matched_keyword,
-      match_type: item.match_type,
-      description: null,
+      match_type: item.match_type,   // needs migration.sql to have run
+      description: null,             // needs migration.sql to have run
       value_source: '',
       condition: null,
       condition_score: null,
