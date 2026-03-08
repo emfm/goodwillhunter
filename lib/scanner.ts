@@ -140,13 +140,19 @@ function isExpired(endTimeStr: string): boolean {
 }
 
 // ── ShopGoodwill ──────────────────────────────────────────────────────────────
+// CONFIRMED from bundle analysis (chunk 540.f273fdc0838e96d1.js):
+//   getProducts(h) posts long-form keys directly to Search/ItemListing
+//   JWT interceptor has NO allowedDomains → no auth header added for cross-origin
+//   Search is effectively PUBLIC — no Authorization header needed or expected
+//   Abbreviated keys (st, hp, etc.) crash the server with HTTP 500
+//   Long-form keys + no auth = HTTP 200 with real results
 async function searchShopGoodwill(keyword: string, maxPrice: number, pages: number): Promise<RawItem[]> {
-  const token = await getSGToken()
-  if (!token) return []
-
   const results: RawItem[] = []
   // Random cold-start delay so cron runs don't hit at identical timestamps
   await jitter(500, 4000)
+  // Today's date in M/d/yyyy for closedAuctionEndingDate field
+  const d = new Date()
+  const todayStr = `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`
   for (let page = 1; page <= pages; page++) {
     try {
       const res = await fetch('https://buyerapi.shopgoodwill.com/api/Search/ItemListing', {
@@ -154,78 +160,71 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
         headers: {
           'Content-Type': 'application/json',
           'Accept': 'application/json',
-          'Authorization': `Bearer ${token}`,
           'Origin': 'https://shopgoodwill.com',
           'Referer': 'https://shopgoodwill.com/',
           'User-Agent': randomUA(),
         },
-        // SG bundle (main.0ac533a6087baed7.js) uses abbreviated keys — long names return HTTP 500
+        // Long-form keys confirmed from productListRequestModel in chunk 607.57ed78687d76d20e.js
+        // Abbreviated keys (st, hp, etc.) cause HTTP 500 — the API does NOT accept them
         body: JSON.stringify({
-          st: keyword,      // searchText
-          sg: '',           // selectedGroup
-          c: '',            // selectedCategoryIds
-          s: '',            // selectedSellerIds
-          lp: 0,            // lowPrice
-          hp: maxPrice,     // highPrice
-          sbn: 0,           // searchBuyNowOnly (0=all,1=buyNow,2=auction)
-          spo: false,       // searchPickupOnly
-          snpo: false,      // searchNoPickupOnly
-          socs: false,      // searchOneCentShippingOnly
-          sd: true,         // searchDescriptions
-          sca: false,       // searchClosedAuctions
-          // caed = today's date in M/d/yyyy — REQUIRED; omitting it causes HTTP 500
-          caed: (() => { const d = new Date(); return `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}` })(),
-          cadb: 7,          // closedAuctionDaysBack
-          scs: false,       // searchCanadaShipping
-          sis: false,       // searchInternationalShippingOnly
-          col: 1,           // sortColumn (1=ClosingDate)
-          p: page,          // page
-          ps: 40,           // pageSize
-          desc: false,      // sortDescending
-          ss: 0,            // savedSearchId
-          UseBuyerPrefs: true,
-          sus: false,       // searchUSOnlyShipping
-          cln: 1,           // categoryLevelNo
-          catIds: '',       // catIds
-          pn: '',           // partNumber
-          wc: false,        // isWeddingCategory
-          mci: false,       // isMultipleCategoryIds
-          hmt: false,       // isFromHeaderMenuTab
+          searchText: keyword,
+          selectedGroup: '',
+          selectedCategoryIds: '',
+          selectedSellerIds: '',
+          lowPrice: 0,
+          highPrice: maxPrice,
+          searchBuyNowOnly: '',
+          searchPickupOnly: false,
+          searchNoPickupOnly: false,
+          searchOneCentShippingOnly: false,
+          searchDescriptions: false,
+          searchClosedAuctions: false,
+          closedAuctionEndingDate: todayStr,
+          closedAuctionDaysBack: 7,
+          searchCanadaShipping: false,
+          searchInternationalShippingOnly: false,
+          sortColumn: 1,
+          page,
+          pageSize: 40,
+          sortDescending: false,
+          savedSearchId: 0,
+          useBuyerPrefs: false,
+          searchUSOnlyShipping: false,
+          categoryLevelNo: 1,
+          catIds: '',
+          partNumber: '',
+          isWeddingCatagory: false,
+          isMultipleCategoryIds: false,
+          isFromHeaderMenuTab: false,
           layout: 'grid',
-          ihp: '',          // isFromHomePage
+          isFromHomePage: '',
         }),
         signal: AbortSignal.timeout(12000),
       })
       if (!res.ok) {
         const errText = await res.text().catch(() => '')
         console.warn(`ShopGoodwill search HTTP ${res.status} for "${keyword}" p${page} — ${errText.slice(0, 120)}`)
-        if (res.status === 401) { _sgToken = null } // force re-login next time
         break
       }
       const data = await res.json()
-      // SG response: {status, message, data: {searchResults: {items: [...]}}}
-      const items: any[] = data?.data?.searchResults?.items
-        ?? data?.searchResults?.items
-        ?? data?.data?.items
-        ?? data?.items
-        ?? (Array.isArray(data?.data) ? data.data : [])
-        ?? []
-      if (page === 1) console.log(`  SG "${keyword}" p${page}: ${items.length} items (top-level keys: ${Object.keys(data ?? {}).join(',')})`)
+      // Response: {searchResults: {items: [...], itemCount: N}, maxTotalRecords, ...}
+      const items: any[] = data?.searchResults?.items ?? []
+      if (page === 1) console.log(`  SG "${keyword}" p${page}: ${items.length} items`)
       else console.log(`  SG "${keyword}" p${page}: ${items.length} items`)
       if (!items.length) break
       for (const item of items) {
         const endTime = item.endTime ?? item.closingDate ?? item.endDate ?? ''
         if (isExpired(endTime)) continue
-        const bid = parseFloat(item.currentPrice ?? item.currentBid ?? item.minimumBid ?? 0)
+        const bid = parseFloat(item.currentPrice ?? item.minimumBid ?? 0)
         if (bid > maxPrice) continue
         results.push({
-          title: item.title ?? item.itemTitle ?? item.name ?? '',
+          title: item.title ?? '',
           current_bid: bid,
           url: `https://shopgoodwill.com/item/${item.itemId}`,
-          image_url: item.imageURL ?? item.galleryURL ?? item.thumbnailURL ?? '',
+          image_url: item.imageURL ?? item.galleryURL ?? '',
           end_time: endTime,
           time_remaining: timeRemaining(endTime),
-          num_bids: parseInt(item.numberOfBids ?? item.numBids ?? item.bidCount ?? 0),
+          num_bids: parseInt(item.numBids ?? item.numberOfBids ?? 0),
           source: 'ShopGoodwill',
           matched_keyword: keyword,
         })
@@ -240,11 +239,14 @@ async function searchShopGoodwill(keyword: string, maxPrice: number, pages: numb
 }
 
 // ── CTBids auth ───────────────────────────────────────────────────────────────
-// Login: POST https://admin.ctbids.com/services/api/v1/admin/auth/token
-// Body:  {"data": {"username": "email@x.com", "password": "pass"}}
-// Returns: {access: "<jwt>", refresh: "<jwt>"}
+// Buyer login (confirmed from chunk 21/ctbids.com bundle, onSignin handler):
+//   POST https://ctbids.com/services/api/v1/buyer/auth/token
+//   Body: {data: {username: email, password: btoa(pass), "keep-user-logged-in": false}}
+//   No auth header needed
+//   Returns: {accessToken, refreshToken} at top level of response
+// NOTE: admin.ctbids.com/admin/auth/token is the SELLER portal — rejects buyer accounts
 // Search: POST https://sale.ctbids.com/services/api/v1/search/item/search/list
-// Headers: Authorization: Bearer <access>
+// Headers: Authorization: Bearer <accessToken>
 let _ctToken: string | null = null
 let _ctTokenExpiry = 0
 
@@ -262,7 +264,7 @@ async function getCTToken(): Promise<string | null> {
   console.log(`CTBids login attempt: user="${user}" (${user.length} chars), pass length=${pass.length}`)
 
   try {
-    const res = await fetch('https://admin.ctbids.com/services/api/v1/admin/auth/token', {
+    const res = await fetch('https://ctbids.com/services/api/v1/buyer/auth/token', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -271,15 +273,15 @@ async function getCTToken(): Promise<string | null> {
         'Referer': 'https://ctbids.com/',
         'User-Agent': randomUA(),
       },
-      // CTBids frontend btoa()-encodes the password before sending (chunk 337.b89117d8)
+      // CTBids buyer frontend btoa()-encodes the password (confirmed chunk 21.a3eea968, onSignin)
       body: JSON.stringify({ data: { username: user.toLowerCase(), password: Buffer.from(pass).toString('base64'), 'keep-user-logged-in': false } }),
       signal: AbortSignal.timeout(15000),
     })
 
     const data = await res.json()
 
-    // Admin endpoint returns: {status:"success", data:{accessToken:"...", refreshToken:"..."}}
-    const access = data?.data?.accessToken ?? data?.accessToken ?? data?.access ?? data?.data?.access
+    // Buyer endpoint returns: {accessToken, refreshToken} at the top level
+    const access = data?.accessToken ?? data?.data?.accessToken ?? data?.access
     if (!access) {
       const errMsg = typeof data?.message === 'object'
         ? data.message?.CBMSW?.message ?? JSON.stringify(data.message).slice(0, 120)
