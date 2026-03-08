@@ -411,7 +411,88 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
 // ── Value estimator (Claude-powered) ─────────────────────────────────────────
 const valueCache = new Map<string, { value: number; source: string }>()
 
+// ── PriceCharting real-price scraper ─────────────────────────────────────────
+// PriceCharting has actual market data for video games, retro electronics,
+// and TCG cards — way more accurate than Claude's memory-based estimates.
+// We use it first; fall back to Claude Haiku for autographs/misc/no-match.
+
+function cleanQueryForPricecharting(title: string): string {
+  let t = title
+  // Strip auction noise: lot descriptions, weights, condition qualifiers
+  t = t.replace(/(lot of \d+|\d+\s*(loose|pcs|pieces|items|cards)|lot of|bundle with|bundle|not tested|untested|as-is|as is|for parts|near mint|nm|very good|vg\+?|good|poor|incomplete|complete in box|cib)/gi, '')
+  t = t.replace(/\d+\.?\d*\s*(lb|lbs|oz)/gi, '')
+  // Cut at comma or dash — everything after is usually "and more" filler
+  t = t.replace(/[,\-–—].*$/, '')
+  // Remove COA/auth markers (we handle autographs via Claude)
+  t = t.replace(/(signed|autographed?|autograph|coa|jsa|psa|beckett|authenticated?)/gi, '')
+  t = t.replace(/\s+/g, ' ').trim().slice(0, 60)
+  return t
+}
+
+function wordOverlap(a: string, b: string): number {
+  const wa = new Set((a.toLowerCase().match(/\w{3,}/g) ?? []))
+  const wb = new Set((b.toLowerCase().match(/\w{3,}/g) ?? []))
+  if (!wa.size || !wb.size) return 0
+  let overlap = 0
+  wa.forEach(w => { if (wb.has(w)) overlap++ })
+  return overlap / Math.max(wa.size, wb.size)
+}
+
+async function lookupPricecharting(title: string): Promise<{ value: number; source: string } | null> {
+  const query = cleanQueryForPricecharting(title)
+  if (query.length < 5) return null
+
+  try {
+    const url = `https://www.pricecharting.com/search-products?q=${encodeURIComponent(query)}&type=prices`
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      signal: AbortSignal.timeout(8000),
+    })
+    if (!res.ok) return null
+
+    const html = await res.text()
+    // Parse table rows: <tr id="..."> contains title + js-price spans
+    const rowRe = /<tr[^>]*id="[^"]+"[^>]*>([\s\S]*?)<\/tr>/g
+    let match: RegExpExecArray | null
+    const rows: Array<{ title: string; price: number }> = []
+
+    while ((match = rowRe.exec(html)) !== null && rows.length < 5) {
+      const row = match[1]
+      const titleM = row.match(/class="title"[^>]*>\s*<a[^>]*>([^<]+)/)
+      const priceM = row.match(/class="[^"]*js-price[^"]*">\$([0-9,]+\.?[0-9]*)/)
+      if (titleM && priceM) {
+        const price = parseFloat(priceM[1].replace(/,/g, ''))
+        if (!isNaN(price) && price > 0) {
+          rows.push({ title: titleM[1].trim(), price })
+        }
+      }
+    }
+
+    if (!rows.length) return null
+
+    // Only trust the result if the top hit actually matches our query
+    const topMatch = rows[0]
+    const sim = wordOverlap(query, topMatch.title)
+    if (sim < 0.25) {
+      // No good match — try second result
+      if (rows.length > 1 && wordOverlap(query, rows[1].title) >= 0.25) {
+        return { value: rows[1].price, source: `PriceCharting: ${rows[1].title.slice(0, 40)}` }
+      }
+      return null
+    }
+
+    return { value: topMatch.price, source: `PriceCharting: ${topMatch.title.slice(0, 40)}` }
+  } catch {
+    return null
+  }
+}
+
 // Batch multiple titles into one Claude call to save time + cost
+
 const VALUE_BATCH_SYSTEM = `You are an expert resale price estimator for thrift auction items — vintage video games, retro electronics, big-box PC games, trading cards, signed memorabilia, and collectibles.
 
 Given a list of auction item titles, estimate the realistic resale value (what it would sell for on eBay in used/good condition). Be conservative — base your estimate on actual recent sold prices.
@@ -675,38 +756,65 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
 
   const candidates = rawItems.filter(i => i.title?.trim())
 
-  // ── Phase 2: Value estimation — ALL batches in parallel ─────────────────────
-  // Split into 20-title chunks, fire them ALL simultaneously via Promise.all.
-  // 10 batches sequential = ~25s. 10 batches parallel = ~3s.
-  console.log(`[SCAN] Estimating values for ${candidates.length} items (parallel batches)...`)
-  setScanStatus({ phase: 'estimating', message: 'Estimating resale values', detail: `${candidates.length} items via Claude Haiku`, progress: 42 })
-  const VALUE_BATCH = 20
+  // ── Phase 2: Value estimation ────────────────────────────────────────────────
+  // Step 1: PriceCharting in parallel for all items (real sold data, free, fast)
+  // Step 2: Claude Haiku in parallel for anything PriceCharting couldn't match
+  // Result: real comps where available, AI estimates as fallback
+  console.log(`[SCAN] Looking up ${candidates.length} items (PriceCharting + Claude Haiku)...`)
+  setScanStatus({ phase: 'estimating', message: 'Looking up real market prices', detail: `${candidates.length} items via PriceCharting + Claude Haiku`, progress: 42 })
+
   const valMap = new Map<string, { value: number; source: string }>()
 
-  // Build batch list of only uncached titles
-  const batches: Array<{ items: typeof candidates; titles: string[] }> = []
-  for (let i = 0; i < candidates.length; i += VALUE_BATCH) {
-    const batchItems = candidates.slice(i, i + VALUE_BATCH)
-    const uncached = batchItems.filter(item => !valueCache.has(item.title))
-    if (uncached.length > 0) batches.push({ items: batchItems, titles: uncached.map(i => i.title) })
-    else batchItems.forEach(item => valMap.set(item.url, valueCache.get(item.title)!))
+  // Step 1: PriceCharting — all items in parallel (just web scraping, fast)
+  const pcResults = await Promise.all(
+    candidates.map(item =>
+      valueCache.has(item.title)
+        ? Promise.resolve(valueCache.get(item.title)!)
+        : lookupPricecharting(item.title)
+    )
+  )
+
+  const needsHaiku: typeof candidates = []
+  candidates.forEach((item, idx) => {
+    const pc = pcResults[idx]
+    if (pc && pc.value > 0) {
+      valueCache.set(item.title, pc)
+      valMap.set(item.url, pc)
+    } else {
+      needsHaiku.push(item)
+    }
+  })
+
+  const pcHits = candidates.length - needsHaiku.length
+  console.log(`[SCAN] PriceCharting: ${pcHits} hits, ${needsHaiku.length} need Claude estimate`)
+  setScanStatus({ detail: `${pcHits} real prices found, estimating ${needsHaiku.length} via AI...`, progress: 52 })
+
+  // Step 2: Claude Haiku for the rest — batches of 20, all parallel
+  if (needsHaiku.length > 0) {
+    const VALUE_BATCH = 20
+    const batches: Array<{ items: typeof candidates; titles: string[] }> = []
+    for (let i = 0; i < needsHaiku.length; i += VALUE_BATCH) {
+      const batchItems = needsHaiku.slice(i, i + VALUE_BATCH)
+      const uncached = batchItems.filter(item => !valueCache.has(item.title))
+      if (uncached.length > 0) batches.push({ items: batchItems, titles: uncached.map(c => c.title) })
+      else batchItems.forEach(item => valMap.set(item.url, valueCache.get(item.title)!))
+    }
+    await Promise.all(batches.map(async ({ items, titles }) => {
+      const results = await estimateValueBatch(titles)
+      let ri = 0
+      for (const item of items) {
+        if (!valueCache.has(item.title)) {
+          valueCache.set(item.title, results[ri++] ?? { value: 0, source: '' })
+        }
+        valMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' })
+      }
+    }))
   }
 
-  // Fire all batches at once
-  await Promise.all(batches.map(async ({ items, titles }) => {
-    const results = await estimateValueBatch(titles)
-    let ri = 0
-    for (const item of items) {
-      if (!valueCache.has(item.title)) {
-        valueCache.set(item.title, results[ri++] ?? { value: 0, source: '' })
-      }
-      valMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' })
-    }
-  }))
-
   const valMs = Date.now() - scanStart - crawlMs
-  console.log(`[SCAN] Value estimation done in ${(valMs/1000).toFixed(1)}s`)
-  setScanStatus({ progress: 60, detail: `${candidates.length} items valued` })
+  const realPrices = [...valMap.values()].filter(v => v.source.startsWith('PriceCharting')).length
+  console.log(`[SCAN] Valuation done in ${(valMs/1000).toFixed(1)}s — ${realPrices} real comps, ${valMap.size - realPrices} AI estimates`)
+  setScanStatus({ progress: 60, detail: `${realPrices} real market prices + ${valMap.size - realPrices} AI estimates` })
 
   // ── Phase 3: Pre-score without images → pick TOP candidates for vision ──────
   // This ensures we only spend image API budget on items most likely to be deals.
