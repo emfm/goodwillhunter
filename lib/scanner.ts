@@ -409,26 +409,46 @@ async function estimateValueBatch(titles: string[]): Promise<Array<{ value: numb
         'content-type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001', // fast + cheap for bulk value lookups
-        max_tokens: 1024,
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 4096,  // 20 items × ~40 tokens each = ~800 tokens; 4096 gives plenty of room
         system: VALUE_BATCH_SYSTEM,
         messages: [{ role: 'user', content: `Estimate resale values for these auction items:\n\n${prompt}` }],
       }),
-      signal: AbortSignal.timeout(20000),
+      signal: AbortSignal.timeout(30000),
     })
 
-    if (!res.ok) return titles.map(() => ({ value: 0, source: '' }))
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '')
+      console.error(`[VALUE] API error ${res.status}:`, errText.slice(0, 200))
+      return titles.map(() => ({ value: 0, source: '' }))
+    }
     const data = await res.json()
-    const raw = data.content?.[0]?.text?.trim() ?? '[]'
-    const clean = raw.replace(/^```[a-z]*\n?|\n?```$/gm, '').trim()
-    const parsed = JSON.parse(clean) as Array<{ value: number; note: string }>
+    const raw = data.content?.[0]?.text?.trim() ?? ''
+    if (!raw) { console.error('[VALUE] Empty response from Claude'); return titles.map(() => ({ value: 0, source: '' })) }
 
-    return parsed.map(p => ({
+    // Strip markdown fences if present
+    const clean = raw.replace(/^```[a-z]*\n?|\n?```$/gm, '').trim()
+
+    // If JSON got truncated, patch it so we get partial results rather than zero
+    let toParse = clean
+    if (!toParse.endsWith(']')) {
+      // Close off the last incomplete object and the array
+      const lastComma = toParse.lastIndexOf(',')
+      const lastBrace = toParse.lastIndexOf('}')
+      toParse = (lastBrace > lastComma ? toParse.slice(0, lastBrace + 1) : toParse.slice(0, lastComma)) + ']'
+    }
+
+    const parsed = JSON.parse(toParse) as Array<{ value: number; note: string }>
+    console.log(`[VALUE] Got ${parsed.length}/${titles.length} estimates`)
+
+    // Pad with zeros if we got fewer entries than titles (truncation)
+    const padded = Array.from({ length: titles.length }, (_, i) => parsed[i] ?? { value: 0, note: 'no estimate' })
+    return padded.map(p => ({
       value: Math.round((Number(p.value) || 0) * 100) / 100,
-      source: `Claude estimate: ${p.note ?? ''}`,
+      source: p.note ? `Claude: ${p.note}` : 'Claude estimate',
     }))
   } catch (e) {
-    console.warn('Value estimation error:', e)
+    console.error('[VALUE] Estimation error:', e)
     return titles.map(() => ({ value: 0, source: '' }))
   }
 }
@@ -530,9 +550,21 @@ function scoreDeal(
   config: AppConfig
 ): number {
   const adj = estVal * (img?.value_multiplier ?? 1)
-  if (adj <= 0 || item.current_bid <= 0) return 0
 
-  let score = ((adj - item.current_bid) / adj) * 100
+  // Base score: ROI if we have a value estimate; otherwise a signal-only score
+  // so items don't all show 0 while estimates are loading or missing
+  let score: number
+  if (adj > 0 && item.current_bid > 0) {
+    score = ((adj - item.current_bid) / adj) * 100
+  } else if (item.current_bid > 0) {
+    // No estimate yet — base on bid signals only, capped at 40
+    score = 20
+    score += item.num_bids < 3 ? 10 : 0  // low competition
+    if (config.high_value_keywords.some(w => item.title.toLowerCase().includes(w.toLowerCase()))) score += 10
+    return Math.min(40, Math.round(score))
+  } else {
+    return 0
+  }
 
   if (img) {
     score += (img.condition_score - 5)
