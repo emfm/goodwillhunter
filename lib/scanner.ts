@@ -1,4 +1,5 @@
 import { AppConfig, Deal } from './types'
+import { setScanStatus } from './scan-status-store'
 import { createCipheriv } from 'crypto'
 
 // ── Stealth helpers ───────────────────────────────────────────────────────────
@@ -582,42 +583,72 @@ function scoreDeal(
 }
 
 // ── Main scan ─────────────────────────────────────────────────────────────────
+// Time budget for Vercel Pro (300s hard limit):
+//   Crawl:           ≤ 60s   (SG + CTBids, 200–500ms between keywords)
+//   Value estimation:≤ 30s   (Claude Haiku, 20-title batches, sequential)
+//   Image analysis:  ≤ 120s  (Claude Sonnet, parallel 5, TOP 40 only)
+//   Overhead/buffer: ≤ 30s
+//   Total target:    ≤ 240s  (60s headroom vs 300s hard limit)
+const MAX_IMAGE_CANDIDATES = 40   // only analyze the most promising items
+const CRAWL_JITTER_MIN = 200      // ms between keyword requests — polite but not slow
+const CRAWL_JITTER_MAX = 500
+
 export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[]> {
   const seen = new Set<string>()
   const rawItems: RawItem[] = []
+  const scanStart = Date.now()
 
-  // ── Crawl ──────────────────────────────────────────────────────────────────
-  for (const kw of config.keywords) {
+  // ── Phase 1: Crawl ─────────────────────────────────────────────────────────
+  const totalKeywords = config.keywords.length
+  setScanStatus({ phase: 'starting', message: 'Starting scan…', detail: `${totalKeywords} keywords across ${config.sources.join(', ')}`, progress: 2, keywordsTotal: totalKeywords, keywordsDone: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null })
+
+  for (let kwIdx = 0; kwIdx < config.keywords.length; kwIdx++) {
+    const kw = config.keywords[kwIdx]
     console.log(`\n[SCAN] keyword: "${kw}"`)
+
     if (config.sources.includes('shopgoodwill')) {
+      setScanStatus({ phase: 'crawling_sg', message: 'Searching ShopGoodwill', detail: `"${kw}" (${kwIdx + 1}/${totalKeywords})`, currentKeyword: kw, keywordsDone: kwIdx, progress: Math.round(5 + (kwIdx / totalKeywords) * 30) })
       try {
         const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
         const fresh = items.filter(i => !seen.has(i.url))
         fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
+        setScanStatus({ sgItems: rawItems.filter(i => i.source === 'ShopGoodwill').length, itemsFound: rawItems.length })
         console.log(`  [SG]  "${kw}": ${items.length} items (${fresh.length} new)`)
       } catch (e) { console.error(`  [SG]  "${kw}" ERROR:`, e) }
     }
+
     if (config.sources.includes('ctbids')) {
+      setScanStatus({ phase: 'crawling_ct', message: 'Searching CTBids', detail: `"${kw}" (${kwIdx + 1}/${totalKeywords})`, currentKeyword: kw })
       try {
         const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
         const fresh = items.filter(i => !seen.has(i.url))
         fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
+        setScanStatus({ ctItems: rawItems.filter(i => i.source === 'CTBids').length, itemsFound: rawItems.length })
         console.log(`  [CT]  "${kw}": ${items.length} items (${fresh.length} new)`)
       } catch (e) { console.error(`  [CT]  "${kw}" ERROR:`, e) }
     }
-    await jitter(500, 1200)
+
+    setScanStatus({ keywordsDone: kwIdx + 1 })
+    // Polite delay between keywords — short enough to fit in budget
+    if (kwIdx < config.keywords.length - 1) await jitter(CRAWL_JITTER_MIN, CRAWL_JITTER_MAX)
   }
 
   const sgCount = rawItems.filter(i => i.source === 'ShopGoodwill').length
   const ctCount = rawItems.filter(i => i.source === 'CTBids').length
-  console.log(`\n[SCAN] Crawl complete: ${rawItems.length} total | SG: ${sgCount} | CT: ${ctCount}`)
-  if (!rawItems.length) return []
+  const crawlMs = Date.now() - scanStart
+  console.log(`\n[SCAN] Crawl complete in ${(crawlMs/1000).toFixed(1)}s: ${rawItems.length} total | SG: ${sgCount} | CT: ${ctCount}`)
+
+  setScanStatus({ phase: 'estimating', message: 'Crawl complete', detail: `${rawItems.length} items — SG: ${sgCount}, CTBids: ${ctCount}`, progress: 40, sgItems: sgCount, ctItems: ctCount, itemsFound: rawItems.length })
+  if (!rawItems.length) {
+    setScanStatus({ phase: 'done', message: 'No items found', detail: 'Try different keywords or check source settings', progress: 100, finishedAt: new Date().toISOString() })
+    return []
+  }
 
   const candidates = rawItems.filter(i => i.title?.trim())
-  console.log(`[SCAN] Candidates: ${candidates.length}`)
 
-  // ── Value estimation (batched, 20 per call) ───────────────────────────────
-  console.log('[SCAN] Estimating values...')
+  // ── Phase 2: Value estimation (batched 20 per Claude Haiku call) ────────────
+  console.log(`[SCAN] Estimating values for ${candidates.length} items...`)
+  setScanStatus({ phase: 'estimating', message: 'Estimating resale values', detail: `${candidates.length} items via Claude Haiku`, progress: 42 })
   const VALUE_BATCH = 20
   const valMap = new Map<string, { value: number; source: string }>()
   for (let i = 0; i < candidates.length; i += VALUE_BATCH) {
@@ -630,30 +661,59 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       })
     }
     batch.forEach(item => { valMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' }) })
+    const pct = Math.round(42 + ((i + VALUE_BATCH) / candidates.length) * 18)
+    setScanStatus({ progress: Math.min(60, pct), detail: `Valued ${Math.min(i + VALUE_BATCH, candidates.length)} / ${candidates.length} items` })
   }
-  console.log('[SCAN] Value estimation done')
+  const valMs = Date.now() - scanStart - crawlMs
+  console.log(`[SCAN] Value estimation done in ${(valMs/1000).toFixed(1)}s`)
 
-  // ── Image analysis (parallel batches of 5) ────────────────────────────────
+  // ── Phase 3: Pre-score without images → pick TOP candidates for vision ──────
+  // This ensures we only spend image API budget on items most likely to be deals.
+  // Pre-score = (est_value - bid) / est_value × 100, clamped to [0,100]
+  const prescored = candidates.map(item => {
+    const { value } = valMap.get(item.url) ?? { value: 0 }
+    const bid = item.current_bid
+    const prescore = (value > 0 && bid > 0) ? Math.max(0, ((value - bid) / value) * 100) : 0
+    return { item, value, prescore }
+  })
+  // Sort by prescore desc, take top MAX_IMAGE_CANDIDATES
+  prescored.sort((a, b) => b.prescore - a.prescore)
+  const imgCandidates = prescored.slice(0, MAX_IMAGE_CANDIDATES).map(p => p.item)
+  console.log(`[SCAN] Image analysis: top ${imgCandidates.length} of ${candidates.length} candidates selected`)
+
+  // ── Phase 4: Image analysis — parallel batches of 5 ─────────────────────────
   const analyzeImages = config.analyze_images && !!process.env.ANTHROPIC_API_KEY
   const imgMap = new Map<string, ImageAnalysis | null>()
 
-  if (analyzeImages) {
-    console.log(`[SCAN] Analyzing images for ${candidates.length} items (parallel batches of 5)...`)
+  if (analyzeImages && imgCandidates.length > 0) {
+    const timeElapsed = Date.now() - scanStart
+    const timeLeft = 280_000 - timeElapsed  // stay 20s inside the 300s limit
+    const maxBatches = Math.floor(timeLeft / 4500)  // conservative 4.5s per batch of 5
+    const safeCount = Math.min(imgCandidates.length, maxBatches * 5)
+    const toAnalyze = imgCandidates.slice(0, safeCount)
+
+    console.log(`[SCAN] Analyzing ${toAnalyze.length} images (${(timeElapsed/1000).toFixed(1)}s elapsed, ${(timeLeft/1000).toFixed(1)}s budget remaining)`)
+    setScanStatus({ phase: 'analyzing', message: 'Analyzing photos with Claude Vision', detail: `Top ${toAnalyze.length} candidates`, progress: 62, imagesTotal: toAnalyze.length, imagesAnalyzed: 0 })
+
     const IMG_BATCH = 5
-    for (let i = 0; i < candidates.length; i += IMG_BATCH) {
-      const batch = candidates.slice(i, i + IMG_BATCH)
+    for (let i = 0; i < toAnalyze.length; i += IMG_BATCH) {
+      const batch = toAnalyze.slice(i, i + IMG_BATCH)
       const results = await Promise.all(
         batch.map(item => analyzeImage(item.image_url, item.title).catch(() => null))
       )
       batch.forEach((item, idx) => { imgMap.set(item.url, results[idx] ?? null) })
-      if (i + IMG_BATCH < candidates.length) await jitter(200, 400)
+      const done = Math.min(i + IMG_BATCH, toAnalyze.length)
+      setScanStatus({ imagesAnalyzed: done, detail: `${done} / ${toAnalyze.length} images analyzed`, progress: Math.min(90, Math.round(62 + (done / toAnalyze.length) * 28)) })
+      if (i + IMG_BATCH < toAnalyze.length) await jitter(100, 200)  // minimal gap between batches
     }
-    console.log('[SCAN] Image analysis done')
+    const imgMs = Date.now() - scanStart - crawlMs - valMs
+    console.log(`[SCAN] Image analysis done in ${(imgMs/1000).toFixed(1)}s`)
   } else {
-    console.log('[SCAN] Image analysis skipped (disabled or no API key)')
+    console.log('[SCAN] Image analysis skipped')
+    setScanStatus({ phase: 'analyzing', message: 'Skipping image analysis', detail: 'Enable in Config → Advanced', progress: 90 })
   }
 
-  // ── Build deal rows ────────────────────────────────────────────────────────
+  // ── Phase 5: Build final deal rows ─────────────────────────────────────────
   const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[] = []
 
   for (const item of candidates) {
@@ -663,34 +723,37 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     const score = scoreDeal(item, estVal, img, config)
 
     deals.push({
-      title:           item.title,
-      current_bid:     item.current_bid,
-      estimated_value: estVal,
-      adjusted_value:  adjValue,
-      deal_score:      score,
-      url:             item.url,
-      image_url:       item.image_url,
-      source:          item.source,
-      end_time:        item.end_time,
-      time_remaining:  item.time_remaining,
-      num_bids:        item.num_bids,
-      category:        categorize(item.title),
-      matched_keyword: item.matched_keyword,
-      match_type:      item.match_type,
-      description:     null,
-      value_source:    valSource,
-      condition:       img?.condition ?? null,
-      condition_score: img?.condition_score ?? null,
-      completeness:    img?.completeness ?? null,
-      is_authentic:    img?.is_authentic ?? null,
+      title:            item.title,
+      current_bid:      item.current_bid,
+      estimated_value:  estVal,
+      adjusted_value:   adjValue,
+      deal_score:       score,
+      url:              item.url,
+      image_url:        item.image_url,
+      source:           item.source,
+      end_time:         item.end_time,
+      time_remaining:   item.time_remaining,
+      num_bids:         item.num_bids,
+      category:         categorize(item.title),
+      matched_keyword:  item.matched_keyword,
+      match_type:       item.match_type,
+      description:      null,
+      value_source:     valSource,
+      condition:        img?.condition ?? null,
+      condition_score:  img?.condition_score ?? null,
+      completeness:     img?.completeness ?? null,
+      is_authentic:     img?.is_authentic ?? null,
       value_multiplier: img?.value_multiplier ?? 1,
-      flags:           img?.flags ?? [],
-      positives:       img?.positives ?? [],
-      img_summary:     img?.summary ?? null,
+      flags:            img?.flags ?? [],
+      positives:        img?.positives ?? [],
+      img_summary:      img?.summary ?? null,
     })
   }
 
+  const totalMs = Date.now() - scanStart
+  const withImg = deals.filter(d => d.img_summary).length
   const withScore = deals.filter(d => d.deal_score > 0).length
-  console.log(`[SCAN] Built ${deals.length} deals (${withScore} with real score, ${deals.length - withScore} unscored)`)
+  console.log(`\n[SCAN] Done in ${(totalMs/1000).toFixed(1)}s — ${deals.length} deals | ${withImg} with image analysis | ${withScore} scored`)
+  setScanStatus({ phase: 'done', message: 'Scan complete', detail: `${deals.length} deals found (${withImg} with photo analysis)`, progress: 100, finishedAt: new Date().toISOString() })
   return deals
 }
