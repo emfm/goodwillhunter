@@ -556,110 +556,67 @@ function scoreDeal(
   return Math.max(0, Math.min(100, Math.round(score * 10) / 10))
 }
 
-// ── Description generator ────────────────────────────────────────────────────
-// Generates a 1-sentence human-readable description for each item using Claude.
-// Batched so it's one API call per 40 items.
-const DESC_SYSTEM = `You are helping a resale buyer understand auction listings at a glance.
-Given a list of auction item titles, write a single concise sentence (under 20 words) for each that describes what the item is and why it might be collectible or valuable. Be specific — mention the platform, era, format, or condition clues if present in the title.
-Respond ONLY with a JSON array of strings, one per title, same order. No extra text.`
-
-const descCache = new Map<string, string>()
-
-async function generateDescriptionsBatch(titles: string[]): Promise<string[]> {
-  if (!titles.length) return []
-  if (!process.env.ANTHROPIC_API_KEY) return titles.map(() => '')
-  try {
-    const prompt = titles.map((t, i) => `${i + 1}. ${t}`).join('\n')
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY!,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2048,
-        system: DESC_SYSTEM,
-        messages: [{ role: 'user', content: `Describe these auction items:\n\n${prompt}` }],
-      }),
-      signal: AbortSignal.timeout(25000),
-    })
-    if (!res.ok) return titles.map(() => '')
-    const data = await res.json()
-    const text = data.content?.[0]?.text ?? '[]'
-    const clean = text.replace(/```json|```/g, '').trim()
-    const arr = JSON.parse(clean)
-    return Array.isArray(arr) ? arr.map(String) : titles.map(() => '')
-  } catch (e) {
-    console.warn('Description generation error:', e)
-    return titles.map(() => '')
-  }
-}
-
 // ── Main scan ─────────────────────────────────────────────────────────────────
-// NOTE: Scoring is intentionally bypassed — all found items are stored as deals
-// with deal_score=100 so everything shows in the UI. Re-enable scoring once
-// the pipeline is confirmed working end-to-end.
-
 export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[]> {
   const seen = new Set<string>()
   const rawItems: RawItem[] = []
 
+  // ── Crawl sources ──────────────────────────────────────────────────────────
   for (const kw of config.keywords) {
-    console.log(`Scanning: "${kw}"`)
+    console.log(`\n[SCAN] keyword: "${kw}"`)
     if (config.sources.includes('shopgoodwill')) {
-      const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
-      for (const item of items) {
-        if (!seen.has(item.url)) { seen.add(item.url); rawItems.push(item) }
+      try {
+        const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
+        const newItems = items.filter(i => !seen.has(i.url))
+        newItems.forEach(i => { seen.add(i.url); rawItems.push(i) })
+        console.log(`  [SG]     "${kw}" → ${items.length} items (${newItems.length} new)`)
+      } catch (e) {
+        console.error(`  [SG]     "${kw}" THREW:`, e)
       }
     }
     if (config.sources.includes('ctbids')) {
-      const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
-      for (const item of items) {
-        if (!seen.has(item.url)) { seen.add(item.url); rawItems.push(item) }
+      try {
+        const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
+        const newItems = items.filter(i => !seen.has(i.url))
+        newItems.forEach(i => { seen.add(i.url); rawItems.push(i) })
+        console.log(`  [CT]     "${kw}" → ${items.length} items (${newItems.length} new)`)
+      } catch (e) {
+        console.error(`  [CT]     "${kw}" THREW:`, e)
       }
     }
     await jitter(500, 1200)
   }
 
+  // ── Summary ────────────────────────────────────────────────────────────────
   const sgCount = rawItems.filter(i => i.source === 'ShopGoodwill').length
   const ctCount = rawItems.filter(i => i.source === 'CTBids').length
-  console.log(`Raw items found: ${rawItems.length} total | SG: ${sgCount} | CTBids: ${ctCount}`)
+  console.log(`\n[SCAN] ── Crawl complete ──────────────────────────────`)
+  console.log(`[SCAN]   Total unique items : ${rawItems.length}`)
+  console.log(`[SCAN]   ShopGoodwill       : ${sgCount}`)
+  console.log(`[SCAN]   CTBids             : ${ctCount}`)
 
-  // Only skip items with no title
-  const candidates = rawItems.filter(item => item.title?.trim())
-  console.log(`Candidates after basic filter: ${candidates.length}`)
-
-  // ── Generate descriptions in batches ────────────────────────────────────────
-  const DESC_BATCH = 40
-  const descMap = new Map<string, string>()
-  for (let i = 0; i < candidates.length; i += DESC_BATCH) {
-    const batch = candidates.slice(i, i + DESC_BATCH)
-    const uncached = batch.filter(item => !descCache.has(item.title))
-    if (uncached.length > 0) {
-      console.log(`Generating descriptions for ${uncached.length} items (batch ${Math.floor(i/DESC_BATCH)+1})...`)
-      const descs = await generateDescriptionsBatch(uncached.map(item => item.title))
-      uncached.forEach((item, idx) => {
-        descCache.set(item.title, descs[idx] ?? '')
-      })
-    }
-    batch.forEach(item => {
-      descMap.set(item.url, descCache.get(item.title) ?? '')
-    })
+  if (rawItems.length === 0) {
+    console.log('[SCAN]   ⚠ No items found — check credentials and source toggles')
+    return []
   }
 
-  // ── Build deals — NO score filtering, everything is stored ─────────────────
+  if (rawItems.length > 0) {
+    console.log(`[SCAN]   Sample item: "${rawItems[0].title}" $${rawItems[0].current_bid} [${rawItems[0].source}]`)
+  }
+
+  // ── Build deal rows (no scoring, no filtering — store everything) ──────────
+  const candidates = rawItems.filter(item => item.title?.trim())
+  console.log(`[SCAN]   Candidates (has title): ${candidates.length}`)
+
   const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[] = []
 
   for (const item of candidates) {
-    const description = descMap.get(item.url) ?? null
     deals.push({
       title: item.title,
       current_bid: item.current_bid,
       estimated_value: 0,
       adjusted_value: 0,
-      deal_score: 100,          // ← Everything is 🔥 until scoring is re-enabled
+      deal_score: 100,
       url: item.url,
       image_url: item.image_url,
       source: item.source,
@@ -669,7 +626,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       category: categorize(item.title),
       matched_keyword: item.matched_keyword,
       match_type: item.match_type,
-      description,
+      description: null,
       value_source: '',
       condition: null,
       condition_score: null,
@@ -680,10 +637,8 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       positives: [],
       img_summary: null,
     })
-
-    console.log(`ITEM $${item.current_bid} [${item.source}] [${item.match_type}]: ${item.title.slice(0, 60)}`)
   }
 
-  console.log(`=== Stored ${deals.length} items to DB ===`)
+  console.log(`[SCAN] ── Returning ${deals.length} deals to route ──────`)
   return deals
 }
