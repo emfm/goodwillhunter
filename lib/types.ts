@@ -22,6 +22,8 @@ export interface Deal {
   flags: string[]
   positives: string[]
   img_summary: string | null
+  description: string | null
+  match_type: 'text' | 'image'
   notified: boolean
   dismissed: boolean
   bidded: boolean
