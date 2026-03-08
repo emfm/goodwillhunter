@@ -15,16 +15,60 @@ function jitter(minMs: number, maxMs: number) {
   return new Promise(r => setTimeout(r, randInt(minMs, maxMs)))
 }
 
-// Rotate through realistic Chrome UA strings
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0',
+// Current browser fingerprints (Chrome 131/132 + Firefox 133 — dominant in early 2026)
+const BROWSERS = [
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    ch: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    platform: '"Windows"', mobile: '?0',
+  },
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+    ch: '"Google Chrome";v="132", "Chromium";v="132", "Not_A Brand";v="24"',
+    platform: '"Windows"', mobile: '?0',
+  },
+  {
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    ch: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    platform: '"macOS"', mobile: '?0',
+  },
+  {
+    ua: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+    ch: '"Google Chrome";v="132", "Chromium";v="132", "Not_A Brand";v="24"',
+    platform: '"macOS"', mobile: '?0',
+  },
+  {
+    ua: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+    ch: null, platform: null, mobile: null,  // Firefox doesn't send sec-ch-ua
+  },
 ]
-function randomUA() {
-  return USER_AGENTS[randInt(0, USER_AGENTS.length - 1)]
+
+function randomUA() { return BROWSERS[randInt(0, BROWSERS.length - 1)].ua }
+
+// Full browser header set — what a real Chrome/Firefox sends for a JSON API call
+// from a React SPA (same-site XHR to the API subdomain)
+function browserHeaders(site: 'shopgoodwill' | 'ctbids'): Record<string, string> {
+  const b = BROWSERS[randInt(0, BROWSERS.length - 1)]
+  const isFF = !b.ch
+  const headers: Record<string, string> = {
+    'accept': 'application/json, text/plain, */*',
+    'accept-encoding': 'gzip, deflate, br, zstd',
+    'accept-language': 'en-US,en;q=0.9',
+    'content-type': 'application/json',
+    'user-agent': b.ua,
+    'origin': site === 'shopgoodwill' ? 'https://shopgoodwill.com' : 'https://ctbids.com',
+    'referer': site === 'shopgoodwill' ? 'https://shopgoodwill.com/' : 'https://ctbids.com/',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-site',
+    'connection': 'keep-alive',
+  }
+  if (!isFF && b.ch) {
+    headers['sec-ch-ua'] = b.ch
+    headers['sec-ch-ua-mobile'] = b.mobile!
+    headers['sec-ch-ua-platform'] = b.platform!
+  }
+  return headers
 }
 
 // ── ShopGoodwill auth ─────────────────────────────────────────────────────────
@@ -57,13 +101,7 @@ async function getSGToken(): Promise<string | null> {
   try {
     const res = await fetch('https://buyerapi.shopgoodwill.com/api/SignIn/Login', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Origin': 'https://shopgoodwill.com',
-        'Referer': 'https://shopgoodwill.com/',
-        'User-Agent': randomUA(),
-        'Accept': 'application/json, text/plain, */*',
-      },
+      headers: browserHeaders('shopgoodwill'),
       body: JSON.stringify({
         userName: encryptForSG(user),
         password: encryptForSG(pass),
@@ -156,96 +194,52 @@ function isExpired(endTimeStr: string): boolean {
 //   Abbreviated keys (st, hp, etc.) crash the server with HTTP 500
 //   Long-form keys + no auth = HTTP 200 with real results
 async function searchShopGoodwill(keyword: string, maxPrice: number, pages: number): Promise<RawItem[]> {
-  const results: RawItem[] = []
-  // Random cold-start delay so cron runs don't hit at identical timestamps
-  await jitter(100, 500)
-  // Today's date in M/d/yyyy for closedAuctionEndingDate field
   const d = new Date()
   const todayStr = `${d.getMonth()+1}/${d.getDate()}/${d.getFullYear()}`
-  for (let page = 1; page <= pages; page++) {
-    try {
-      const res = await fetch('https://buyerapi.shopgoodwill.com/api/Search/ItemListing', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Origin': 'https://shopgoodwill.com',
-          'Referer': 'https://shopgoodwill.com/',
-          'User-Agent': randomUA(),
-        },
-        // Long-form keys confirmed from productListRequestModel in chunk 607.57ed78687d76d20e.js
-        // Abbreviated keys (st, hp, etc.) cause HTTP 500 — the API does NOT accept them
-        body: JSON.stringify({
-          searchText: keyword,
-          selectedGroup: '',
-          selectedCategoryIds: '',
-          selectedSellerIds: '',
-          lowPrice: 0,
-          highPrice: maxPrice,
-          searchBuyNowOnly: '',
-          searchPickupOnly: false,
-          searchNoPickupOnly: false,
-          searchOneCentShippingOnly: false,
-          searchDescriptions: false,
-          searchClosedAuctions: false,
-          closedAuctionEndingDate: todayStr,
-          closedAuctionDaysBack: 7,
-          searchCanadaShipping: false,
-          searchInternationalShippingOnly: false,
-          sortColumn: 1,
-          page,
-          pageSize: 40,
-          sortDescending: false,
-          savedSearchId: 0,
-          useBuyerPrefs: false,
-          searchUSOnlyShipping: false,
-          categoryLevelNo: 1,
-          catIds: '',
-          partNumber: '',
-          isWeddingCatagory: false,
-          isMultipleCategoryIds: false,
-          isFromHeaderMenuTab: false,
-          layout: 'grid',
-          isFromHomePage: '',
-        }),
-        signal: AbortSignal.timeout(12000),
-      })
-      if (!res.ok) {
-        const errText = await res.text().catch(() => '')
-        console.warn(`ShopGoodwill search HTTP ${res.status} for "${keyword}" p${page} — ${errText.slice(0, 120)}`)
-        break
-      }
-      const data = await res.json()
-      // Response: {searchResults: {items: [...], itemCount: N}, maxTotalRecords, ...}
-      const items: any[] = data?.searchResults?.items ?? []
-      if (page === 1) console.log(`  SG "${keyword}" p${page}: ${items.length} items`)
-      else console.log(`  SG "${keyword}" p${page}: ${items.length} items`)
-      if (!items.length) break
-      for (const item of items) {
-        const endTime = item.endTime ?? item.closingDate ?? item.endDate ?? ''
-        if (isExpired(endTime)) continue
-        const bid = parseFloat(item.currentPrice ?? item.minimumBid ?? 0)
-        if (bid > maxPrice) continue
-        results.push({
-          title: item.title ?? '',
-          current_bid: bid,
-          url: `https://shopgoodwill.com/item/${item.itemId}`,
-          image_url: item.imageURL ?? item.galleryURL ?? '',
-          end_time: endTime,
-          time_remaining: timeRemaining(endTime),
-          num_bids: parseInt(item.numBids ?? item.numberOfBids ?? 0),
-          source: 'ShopGoodwill',
-          matched_keyword: keyword,
-          match_type: 'text',
-        })
-      }
-      await jitter(300, 800)
-    } catch (e) {
-      console.warn(`ShopGoodwill error (${keyword}):`, e)
-      break
-    }
+
+  const fetchPage = async (page: number): Promise<RawItem[]> => {
+    const res = await fetch('https://buyerapi.shopgoodwill.com/api/Search/ItemListing', {
+      method: 'POST',
+      headers: browserHeaders('shopgoodwill'),
+      body: JSON.stringify({
+        searchText: keyword,
+        selectedGroup: '', selectedCategoryIds: '', selectedSellerIds: '',
+        lowPrice: 0, highPrice: maxPrice,
+        searchBuyNowOnly: '', searchPickupOnly: false, searchNoPickupOnly: false,
+        searchOneCentShippingOnly: false, searchDescriptions: false,
+        searchClosedAuctions: false, closedAuctionEndingDate: todayStr,
+        closedAuctionDaysBack: 7, searchCanadaShipping: false,
+        searchInternationalShippingOnly: false, sortColumn: 1,
+        page, pageSize: 40, sortDescending: false, savedSearchId: 0,
+        useBuyerPrefs: false, searchUSOnlyShipping: false, categoryLevelNo: 1,
+        catIds: '', partNumber: '', isWeddingCatagory: false,
+        isMultipleCategoryIds: false, isFromHeaderMenuTab: false,
+        layout: 'grid', isFromHomePage: '',
+      }),
+      signal: AbortSignal.timeout(12000),
+    })
+    if (!res.ok) { console.warn(`SG HTTP ${res.status} "${keyword}" p${page}`); return [] }
+    const data = await res.json()
+    const items: any[] = data?.searchResults?.items ?? []
+    console.log(`  [SG] "${keyword}" p${page}: ${items.length} items`)
+    return items.flatMap(item => {
+      const endTime = item.endTime ?? item.closingDate ?? item.endDate ?? ''
+      if (isExpired(endTime)) return []
+      const bid = parseFloat(item.currentPrice ?? item.minimumBid ?? 0)
+      if (bid > maxPrice) return []
+      return [{ title: item.title ?? '', current_bid: bid,
+        url: `https://shopgoodwill.com/item/${item.itemId}`,
+        image_url: item.imageURL ?? item.galleryURL ?? '',
+        end_time: endTime, time_remaining: timeRemaining(endTime),
+        num_bids: parseInt(item.numBids ?? item.numberOfBids ?? 0),
+        source: 'ShopGoodwill' as const, matched_keyword: keyword, match_type: 'text' as const }]
+    })
   }
-  return results
+
+  // All pages fire simultaneously
+  const pageNums = Array.from({ length: pages }, (_, i) => i + 1)
+  const pageResults = await Promise.all(pageNums.map(fetchPage))
+  return pageResults.flat()
 }
 
 // ── CTBids auth ───────────────────────────────────────────────────────────────
@@ -313,102 +307,66 @@ async function getCTToken(): Promise<string | null> {
 
 // ── CTBids ────────────────────────────────────────────────────────────────────
 async function searchCTBids(keyword: string, maxPrice: number, pages: number): Promise<RawItem[]> {
-  // CTBids uses two fully public (no auth) endpoints:
-  // 1. POST sale.ctbids.com/services/api/v1/search/item/new/list — Elasticsearch filter, returns item metadata
-  // 2. POST ctbids.com/services/api/v1/buyer/auction/item/current/bid — batch bid prices by item ID
-  // No login or token needed for either.
-  const allItems: RawItem[] = []
-  await jitter(100, 500)
+  // CTBids: two public endpoints — search + bid prices.
+  // Fire all pages simultaneously; for each page fire search + bid fetch simultaneously.
+  const fetchPage = async (page: number): Promise<RawItem[]> => {
+    const searchRes = await fetch('https://sale.ctbids.com/services/api/v1/search/item/new/list', {
+      method: 'POST',
+      headers: browserHeaders('ctbids'),
+      body: JSON.stringify({
+        sort: [{ field: 'itemclosetime', direction: 'asc' }],
+        page: { size: 40, number: page },
+        field: ['id', 'title', 'itemclosetime', 'displayimageurl', 'thumbnailurl',
+                'itemseourl', 'saleid', 'city', 'state', 'isshippable', 'category', 'categoryGroup'],
+        filter: [
+          { field: 'salestatus', value: 'Started', op: '=', join: 'AND' },
+          { field: 'itemstatus',  value: 'Ready',   op: '=', join: 'AND' },
+          { field: 'title',       value: keyword,   op: 'LIKE', join: 'AND' },
+        ],
+      }),
+      signal: AbortSignal.timeout(12000),
+    })
+    if (!searchRes.ok) { console.warn(`  [CT] HTTP ${searchRes.status} "${keyword}" p${page}`); return [] }
+    const searchData = await searchRes.json()
+    const items: any[] = searchData?.data ?? []
+    console.log(`  [CT] "${keyword}" p${page}: ${items.length} items`)
+    if (!items.length) return []
 
-  for (let page = 1; page <= pages; page++) {
+    // Fetch bid prices in parallel with nothing (just await it here, search already done)
+    const ids: number[] = items.map((i: any) => i.id)
+    let bidMap: Record<number, { bid: number; bidCount: number }> = {}
     try {
-      // Step 1: search for items by keyword
-      const searchRes = await fetch('https://sale.ctbids.com/services/api/v1/search/item/new/list', {
+      const bidRes = await fetch('https://ctbids.com/services/api/v1/buyer/auction/item/current/bid', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json',
-          'Origin': 'https://ctbids.com',
-          'Referer': 'https://ctbids.com/',
-          'User-Agent': randomUA(),
-        },
-        body: JSON.stringify({
-          sort: [{ field: 'itemclosetime', direction: 'asc' }],
-          page: { size: 40, number: page },
-          field: ['id', 'title', 'itemclosetime', 'displayimageurl', 'thumbnailurl',
-                  'itemseourl', 'saleid', 'city', 'state', 'isshippable', 'category', 'categoryGroup'],
-          filter: [
-            { field: 'salestatus', value: 'Started', op: '=', join: 'AND' },
-            { field: 'itemstatus',  value: 'Ready',   op: '=', join: 'AND' },
-            { field: 'title',       value: keyword,   op: 'LIKE', join: 'AND' },
-          ],
-        }),
-        signal: AbortSignal.timeout(12000),
+        headers: browserHeaders('ctbids'),
+        body: JSON.stringify({ data: { itemIds: ids } }),
+        signal: AbortSignal.timeout(10000),
       })
-
-      if (!searchRes.ok) {
-        console.warn(`  [CT] search HTTP ${searchRes.status} for "${keyword}" p${page}`)
-        break
-      }
-      const searchData = await searchRes.json()
-      const items: any[] = searchData?.data ?? []
-      console.log(`  [CT] "${keyword}" p${page}: ${items.length} items`)
-      if (!items.length) break
-
-      // Step 2: batch fetch current bid prices
-      const ids: number[] = items.map((i: any) => i.id)
-      let bidMap: Record<number, { bid: number; bidCount: number }> = {}
-      try {
-        const bidRes = await fetch('https://ctbids.com/services/api/v1/buyer/auction/item/current/bid', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            'Origin': 'https://ctbids.com',
-            'User-Agent': randomUA(),
-          },
-          body: JSON.stringify({ data: { itemIds: ids } }),
-          signal: AbortSignal.timeout(10000),
-        })
-        if (bidRes.ok) {
-          const bidData = await bidRes.json()
-          for (const b of (bidData?.data ?? [])) {
-            bidMap[b.itemid] = { bid: parseFloat(b.bidprice ?? 0), bidCount: parseInt(b.bidcount ?? b.bidcount ?? 0) }
-          }
+      if (bidRes.ok) {
+        const bidData = await bidRes.json()
+        for (const b of (bidData?.data ?? [])) {
+          bidMap[b.itemid] = { bid: parseFloat(b.bidprice ?? 0), bidCount: parseInt(b.bidcount ?? 0) }
         }
-      } catch (e) {
-        console.warn(`  [CT] bid fetch error for "${keyword}":`, e)
       }
+    } catch (e) { console.warn(`  [CT] bid error "${keyword}" p${page}:`, e) }
 
-      // Step 3: combine
-      for (const item of items) {
-        const endTime = (item.itemclosetime ?? '').replace(' ', 'T')
-        if (isExpired(endTime)) continue
-        const { bid = 0, bidCount = 0 } = bidMap[item.id] ?? {}
-        if (bid > maxPrice) continue
-        const seoUrl = item.itemseourl ?? ''
-        allItems.push({
-          title: item.title ?? '',
-          current_bid: bid,
-          url: `https://www.ctbids.com/#!/estate-sale/${item.saleid}/item/${item.id}/${seoUrl}`,
-          image_url: item.displayimageurl ?? item.thumbnailurl ?? '',
-          end_time: endTime,
-          time_remaining: timeRemaining(endTime),
-          num_bids: bidCount,
-          source: 'CTBids',
-          matched_keyword: keyword,
-          match_type: 'text',
-        })
-      }
-
-      if (items.length < 40) break  // no more pages
-      await jitter(300, 800)
-    } catch (e) {
-      console.warn(`  [CT] error (${keyword}):`, e)
-      break
-    }
+    return items.flatMap(item => {
+      const endTime = (item.itemclosetime ?? '').replace(' ', 'T')
+      if (isExpired(endTime)) return []
+      const { bid = 0, bidCount = 0 } = bidMap[item.id] ?? {}
+      if (bid > maxPrice) return []
+      return [{ title: item.title ?? '', current_bid: bid,
+        url: `https://www.ctbids.com/#!/estate-sale/${item.saleid}/item/${item.id}/${item.itemseourl ?? ''}`,
+        image_url: item.displayimageurl ?? item.thumbnailurl ?? '',
+        end_time: endTime, time_remaining: timeRemaining(endTime),
+        num_bids: bidCount, source: 'CTBids' as const,
+        matched_keyword: keyword, match_type: 'text' as const }]
+    })
   }
-  return allItems
+
+  const pageNums = Array.from({ length: pages }, (_, i) => i + 1)
+  const pageResults = await Promise.all(pageNums.map(fetchPage))
+  return pageResults.flat()
 }
 
 // ── Value estimator (Claude-powered) ─────────────────────────────────────────
@@ -489,7 +447,12 @@ async function analyzeImage(imageUrl: string, title: string): Promise<ImageAnaly
 
   try {
     const imgRes = await fetch(imageUrl, {
-      headers: { 'User-Agent': randomUA() },
+      headers: {
+        'User-Agent': randomUA(),
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://shopgoodwill.com/',
+      },
       signal: AbortSignal.timeout(8000),
     })
     if (!imgRes.ok) return null
@@ -598,45 +561,46 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   const rawItems: RawItem[] = []
   const scanStart = Date.now()
 
-  // ── Phase 1: Crawl ─────────────────────────────────────────────────────────
+  // ── Phase 1: Crawl — ALL keywords in parallel ────────────────────────────────
+  // Each keyword fires SG + CTBids simultaneously. All keywords fire simultaneously.
+  // 10 keywords sequential = ~58s. 10 keywords parallel = ~6s.
   const totalKeywords = config.keywords.length
-  setScanStatus({ phase: 'starting', message: 'Starting scan…', detail: `${totalKeywords} keywords across ${config.sources.join(', ')}`, progress: 2, keywordsTotal: totalKeywords, keywordsDone: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null })
+  setScanStatus({ phase: 'crawling_sg', message: 'Scanning all keywords…', detail: `${totalKeywords} keywords × 2 sources in parallel`, progress: 5, keywordsTotal: totalKeywords, keywordsDone: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null })
 
-  for (let kwIdx = 0; kwIdx < config.keywords.length; kwIdx++) {
-    const kw = config.keywords[kwIdx]
-    console.log(`\n[SCAN] keyword: "${kw}"`)
+  let keywordsDone = 0
+  // Stagger keyword starts by 0–800ms so we don't hit both sites with
+  // 10 simultaneous identical-structure requests from one IP at t=0.
+  const allResults = await Promise.all(config.keywords.map(async (kw, kwIdx) => {
+    await jitter(kwIdx * 80, kwIdx * 80 + 300)  // 0ms, 80–380ms, 160–460ms … staggered
+    const kwItems: RawItem[] = []
+    await Promise.all([
+      config.sources.includes('shopgoodwill')
+        ? searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
+            .then(items => { kwItems.push(...items); console.log(`  [SG] "${kw}": ${items.length}`) })
+            .catch(e => console.error(`  [SG] "${kw}" ERROR:`, e))
+        : Promise.resolve(),
+      config.sources.includes('ctbids')
+        ? searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
+            .then(items => { kwItems.push(...items); console.log(`  [CT] "${kw}": ${items.length}`) })
+            .catch(e => console.error(`  [CT] "${kw}" ERROR:`, e))
+        : Promise.resolve(),
+    ])
+    keywordsDone++
+    setScanStatus({ keywordsDone, progress: Math.round(5 + (keywordsDone / totalKeywords) * 35) })
+    return kwItems
+  }))
 
-    if (config.sources.includes('shopgoodwill')) {
-      setScanStatus({ phase: 'crawling_sg', message: 'Searching ShopGoodwill', detail: `"${kw}" (${kwIdx + 1}/${totalKeywords})`, currentKeyword: kw, keywordsDone: kwIdx, progress: Math.round(5 + (kwIdx / totalKeywords) * 30) })
-      try {
-        const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
-        const fresh = items.filter(i => !seen.has(i.url))
-        fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
-        setScanStatus({ sgItems: rawItems.filter(i => i.source === 'ShopGoodwill').length, itemsFound: rawItems.length })
-        console.log(`  [SG]  "${kw}": ${items.length} items (${fresh.length} new)`)
-      } catch (e) { console.error(`  [SG]  "${kw}" ERROR:`, e) }
+  // Merge, dedupe by URL
+  for (const kwItems of allResults) {
+    for (const item of kwItems) {
+      if (!seen.has(item.url)) { seen.add(item.url); rawItems.push(item) }
     }
-
-    if (config.sources.includes('ctbids')) {
-      setScanStatus({ phase: 'crawling_ct', message: 'Searching CTBids', detail: `"${kw}" (${kwIdx + 1}/${totalKeywords})`, currentKeyword: kw })
-      try {
-        const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
-        const fresh = items.filter(i => !seen.has(i.url))
-        fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
-        setScanStatus({ ctItems: rawItems.filter(i => i.source === 'CTBids').length, itemsFound: rawItems.length })
-        console.log(`  [CT]  "${kw}": ${items.length} items (${fresh.length} new)`)
-      } catch (e) { console.error(`  [CT]  "${kw}" ERROR:`, e) }
-    }
-
-    setScanStatus({ keywordsDone: kwIdx + 1 })
-    // Polite delay between keywords — short enough to fit in budget
-    if (kwIdx < config.keywords.length - 1) await jitter(CRAWL_JITTER_MIN, CRAWL_JITTER_MAX)
   }
 
   const sgCount = rawItems.filter(i => i.source === 'ShopGoodwill').length
   const ctCount = rawItems.filter(i => i.source === 'CTBids').length
   const crawlMs = Date.now() - scanStart
-  console.log(`\n[SCAN] Crawl complete in ${(crawlMs/1000).toFixed(1)}s: ${rawItems.length} total | SG: ${sgCount} | CT: ${ctCount}`)
+  console.log(`\n[SCAN] Crawl done in ${(crawlMs/1000).toFixed(1)}s: ${rawItems.length} total | SG: ${sgCount} | CT: ${ctCount}`)
 
   setScanStatus({ phase: 'estimating', message: 'Crawl complete', detail: `${rawItems.length} items — SG: ${sgCount}, CTBids: ${ctCount}`, progress: 40, sgItems: sgCount, ctItems: ctCount, itemsFound: rawItems.length })
   if (!rawItems.length) {
@@ -646,26 +610,38 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
 
   const candidates = rawItems.filter(i => i.title?.trim())
 
-  // ── Phase 2: Value estimation (batched 20 per Claude Haiku call) ────────────
-  console.log(`[SCAN] Estimating values for ${candidates.length} items...`)
+  // ── Phase 2: Value estimation — ALL batches in parallel ─────────────────────
+  // Split into 20-title chunks, fire them ALL simultaneously via Promise.all.
+  // 10 batches sequential = ~25s. 10 batches parallel = ~3s.
+  console.log(`[SCAN] Estimating values for ${candidates.length} items (parallel batches)...`)
   setScanStatus({ phase: 'estimating', message: 'Estimating resale values', detail: `${candidates.length} items via Claude Haiku`, progress: 42 })
   const VALUE_BATCH = 20
   const valMap = new Map<string, { value: number; source: string }>()
+
+  // Build batch list of only uncached titles
+  const batches: Array<{ items: typeof candidates; titles: string[] }> = []
   for (let i = 0; i < candidates.length; i += VALUE_BATCH) {
-    const batch = candidates.slice(i, i + VALUE_BATCH)
-    const uncached = batch.filter(item => !valueCache.has(item.title))
-    if (uncached.length > 0) {
-      const results = await estimateValueBatch(uncached.map(item => item.title))
-      uncached.forEach((item, idx) => {
-        valueCache.set(item.title, results[idx] ?? { value: 0, source: '' })
-      })
-    }
-    batch.forEach(item => { valMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' }) })
-    const pct = Math.round(42 + ((i + VALUE_BATCH) / candidates.length) * 18)
-    setScanStatus({ progress: Math.min(60, pct), detail: `Valued ${Math.min(i + VALUE_BATCH, candidates.length)} / ${candidates.length} items` })
+    const batchItems = candidates.slice(i, i + VALUE_BATCH)
+    const uncached = batchItems.filter(item => !valueCache.has(item.title))
+    if (uncached.length > 0) batches.push({ items: batchItems, titles: uncached.map(i => i.title) })
+    else batchItems.forEach(item => valMap.set(item.url, valueCache.get(item.title)!))
   }
+
+  // Fire all batches at once
+  await Promise.all(batches.map(async ({ items, titles }) => {
+    const results = await estimateValueBatch(titles)
+    let ri = 0
+    for (const item of items) {
+      if (!valueCache.has(item.title)) {
+        valueCache.set(item.title, results[ri++] ?? { value: 0, source: '' })
+      }
+      valMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' })
+    }
+  }))
+
   const valMs = Date.now() - scanStart - crawlMs
   console.log(`[SCAN] Value estimation done in ${(valMs/1000).toFixed(1)}s`)
+  setScanStatus({ progress: 60, detail: `${candidates.length} items valued` })
 
   // ── Phase 3: Pre-score without images → pick TOP candidates for vision ──────
   // This ensures we only spend image API budget on items most likely to be deals.
@@ -695,17 +671,14 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     console.log(`[SCAN] Analyzing ${toAnalyze.length} images (${(timeElapsed/1000).toFixed(1)}s elapsed, ${(timeLeft/1000).toFixed(1)}s budget remaining)`)
     setScanStatus({ phase: 'analyzing', message: 'Analyzing photos with Claude Vision', detail: `Top ${toAnalyze.length} candidates`, progress: 62, imagesTotal: toAnalyze.length, imagesAnalyzed: 0 })
 
-    const IMG_BATCH = 5
-    for (let i = 0; i < toAnalyze.length; i += IMG_BATCH) {
-      const batch = toAnalyze.slice(i, i + IMG_BATCH)
-      const results = await Promise.all(
-        batch.map(item => analyzeImage(item.image_url, item.title).catch(() => null))
-      )
-      batch.forEach((item, idx) => { imgMap.set(item.url, results[idx] ?? null) })
-      const done = Math.min(i + IMG_BATCH, toAnalyze.length)
-      setScanStatus({ imagesAnalyzed: done, detail: `${done} / ${toAnalyze.length} images analyzed`, progress: Math.min(90, Math.round(62 + (done / toAnalyze.length) * 28)) })
-      if (i + IMG_BATCH < toAnalyze.length) await jitter(100, 200)  // minimal gap between batches
-    }
+    // Fire ALL image analyses in parallel — Anthropic handles concurrent requests fine.
+    // 40 sequential = ~160s. 40 parallel = ~8s (network-bound, not CPU-bound).
+    setScanStatus({ imagesAnalyzed: 0, detail: `Analyzing ${toAnalyze.length} images in parallel...` })
+    const imgResults = await Promise.all(
+      toAnalyze.map(item => analyzeImage(item.image_url, item.title).catch(() => null))
+    )
+    toAnalyze.forEach((item, idx) => { imgMap.set(item.url, imgResults[idx] ?? null) })
+    setScanStatus({ imagesAnalyzed: toAnalyze.length, detail: `${toAnalyze.length} images analyzed` })
     const imgMs = Date.now() - scanStart - crawlMs - valMs
     console.log(`[SCAN] Image analysis done in ${(imgMs/1000).toFixed(1)}s`)
   } else {
