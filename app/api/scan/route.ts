@@ -8,6 +8,17 @@ import { Deal } from '@/lib/types'
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
 
+// Columns that exist in the base schema (before migration.sql)
+const BASE_COLUMNS = new Set([
+  'title','current_bid','estimated_value','adjusted_value','deal_score',
+  'url','image_url','source','end_time','time_remaining','num_bids',
+  'category','matched_keyword','value_source','condition','condition_score',
+  'completeness','is_authentic','value_multiplier','flags','positives',
+  'img_summary','updated_at',
+])
+// Columns added by migration.sql — safe to include once migration has run
+const MIGRATION_COLUMNS = new Set(['match_type','description'])
+
 export async function POST(req: NextRequest) {
   const auth = req.headers.get('authorization')
   const secret = process.env.CRON_SECRET
@@ -20,107 +31,111 @@ export async function POST(req: NextRequest) {
     console.log('[ROUTE] Goodwill Hunter scan starting')
     console.log('[ROUTE] ══════════════════════════════════════════')
 
-    // ── Load config ──────────────────────────────────────────────────────────
+    // ── Config ───────────────────────────────────────────────────────────────
     const config = await getConfig()
-    console.log(`[ROUTE] Config loaded`)
-    console.log(`[ROUTE]   sources   : ${config.sources.join(', ')}`)
-    console.log(`[ROUTE]   keywords  : ${config.keywords.length} keywords`)
-    console.log(`[ROUTE]   max price : $${config.max_search_price}`)
-    console.log(`[ROUTE]   pages/kw  : ${config.pages_per_keyword}`)
+    console.log(`[ROUTE] sources  : ${config.sources.join(', ')}`)
+    console.log(`[ROUTE] keywords : ${config.keywords.length} — ${config.keywords.slice(0,5).join(', ')}${config.keywords.length > 5 ? '…' : ''}`)
+    console.log(`[ROUTE] maxPrice : $${config.max_search_price} | pages/kw: ${config.pages_per_keyword}`)
 
     // ── Keyword overrides from UI ────────────────────────────────────────────
     let body: { keywords?: string[] } = {}
-    try { body = await req.json() } catch { /* no body is fine */ }
+    try { body = await req.json() } catch { /* no body = fine */ }
     if (body.keywords?.length) {
-      console.log(`[ROUTE] Keyword overrides (${body.keywords.length}): ${body.keywords.join(', ')}`)
+      console.log(`[ROUTE] ⚡ Keyword overrides: ${body.keywords.join(', ')}`)
       config.keywords = body.keywords
     }
 
-    // ── Run crawl ────────────────────────────────────────────────────────────
-    console.log('[ROUTE] Starting scanner...')
+    // ── Scan ─────────────────────────────────────────────────────────────────
+    console.log('[ROUTE] Calling runScan...')
     const deals = await runScan(config)
-    console.log(`[ROUTE] Scanner returned ${deals.length} deals`)
+    console.log(`[ROUTE] runScan returned ${deals.length} deals`)
 
     if (deals.length === 0) {
-      console.log('[ROUTE] ⚠ Zero deals — skipping upsert')
+      console.log('[ROUTE] ⚠ Zero deals — nothing to store')
       await setLastScanTime()
       return NextResponse.json({ message: 'No items found', count: 0 })
     }
 
-    // ── Upsert to DB ─────────────────────────────────────────────────────────
-    console.log(`[ROUTE] Upserting ${deals.length} rows to Supabase...`)
+    // ── Probe DB schema ───────────────────────────────────────────────────────
+    // Try to detect if migration columns exist by probing one row.
     const db = supabaseAdmin()
+    const { data: probe, error: probeErr } = await db
+      .from('deals').select('match_type').limit(1)
+    const migrationDone = !probeErr
+    console.log(`[ROUTE] migration.sql applied: ${migrationDone} ${probeErr ? `(${probeErr.message})` : ''}`)
 
-    const rows = deals.map(d => ({ ...d, updated_at: new Date().toISOString() }))
-    console.log(`[ROUTE]   Sample row url   : ${rows[0]?.url}`)
-    console.log(`[ROUTE]   Sample row title : ${rows[0]?.title?.slice(0, 60)}`)
-    console.log(`[ROUTE]   Sample row source: ${rows[0]?.source}`)
+    // Strip columns that don't exist yet
+    const rows = deals.map(d => {
+      const row: Record<string, unknown> = { updated_at: new Date().toISOString() }
+      for (const [k, v] of Object.entries(d)) {
+        if (BASE_COLUMNS.has(k)) { row[k] = v; continue }
+        if (MIGRATION_COLUMNS.has(k) && migrationDone) { row[k] = v; continue }
+        // skip unknown columns silently
+      }
+      return row
+    })
 
-    const { error: upsertError, count } = await db
+    console.log(`[ROUTE] Upserting ${rows.length} rows (migration cols: ${migrationDone ? 'included' : 'skipped'})`)
+    console.log(`[ROUTE] Sample: "${rows[0]?.title}" | ${rows[0]?.source} | $${rows[0]?.current_bid}`)
+
+    const { error: upsertErr } = await db
       .from('deals')
-      .upsert(rows, { onConflict: 'url', ignoreDuplicates: false })
-      .select('id')  // force count
+      .upsert(rows as any, { onConflict: 'url', ignoreDuplicates: false })
 
-    if (upsertError) {
-      console.error('[ROUTE] ❌ Supabase upsert ERROR:', JSON.stringify(upsertError))
+    if (upsertErr) {
+      console.error('[ROUTE] ❌ UPSERT FAILED:', JSON.stringify(upsertErr))
+      // Don't give up — log and continue so we still set lastScanTime
     } else {
-      console.log(`[ROUTE] ✅ Upsert OK — ${count ?? '?'} rows affected`)
+      console.log(`[ROUTE] ✅ Upsert OK`)
     }
 
-    // ── Verify rows exist in DB ───────────────────────────────────────────────
-    const { count: dbCount, error: countErr } = await db
-      .from('deals')
-      .select('*', { count: 'exact', head: true })
-    if (countErr) {
-      console.error('[ROUTE] ❌ Count check error:', countErr.message)
-    } else {
-      console.log(`[ROUTE] ✅ Total deals in DB now: ${dbCount}`)
-    }
+    // ── Confirm row count ────────────────────────────────────────────────────
+    const { count: dbCount } = await db
+      .from('deals').select('*', { count: 'exact', head: true })
+    console.log(`[ROUTE] ✅ Total rows in deals table: ${dbCount ?? 'unknown'}`)
 
     // ── Alerts ───────────────────────────────────────────────────────────────
     const emailThreshold = config.alert_score_threshold ?? 70
     const { data: emailQueue } = await db
-      .from('deals')
-      .select('*')
+      .from('deals').select('*')
       .in('url', deals.map(d => d.url))
       .eq('notified', false)
       .gte('deal_score', emailThreshold)
       .order('deal_score', { ascending: false })
 
     const toEmail = (emailQueue ?? []) as Deal[]
-    console.log(`[ROUTE] Alert queue: ${toEmail.length} deals above threshold ${emailThreshold}`)
-
-    const smsThreshold = config.sms_score_threshold ?? 75
-    const toSms = config.sms_enabled ? toEmail.filter(d => d.deal_score >= smsThreshold) : []
+    const toSms = config.sms_enabled
+      ? toEmail.filter(d => d.deal_score >= (config.sms_score_threshold ?? 75))
+      : []
 
     if (toEmail.length > 0 && config.alert_email) {
       await sendAlertEmail(toEmail, config.alert_email)
-      console.log(`[ROUTE] Email sent: ${toEmail.length} deals → ${config.alert_email}`)
+      console.log(`[ROUTE] Email: ${toEmail.length} → ${config.alert_email}`)
     }
     if (toSms.length > 0) {
-      const phone = config.alert_phone || process.env.ALERT_PHONE
-      await sendSmsAlert(toSms, phone)
-      console.log(`[ROUTE] SMS sent: ${toSms.length} deals → ${phone}`)
+      await sendSmsAlert(toSms, config.alert_phone || process.env.ALERT_PHONE)
+      console.log(`[ROUTE] SMS: ${toSms.length} sent`)
     }
     if (toEmail.length > 0) {
-      await db.from('deals').update({ notified: true }).in('id', toEmail.map((d: Deal) => d.id))
+      await db.from('deals').update({ notified: true })
+        .in('id', toEmail.map((d: Deal) => d.id))
     }
 
     await setLastScanTime()
 
-    console.log('[ROUTE] ══════════════════════════════════════════')
-    console.log(`[ROUTE] DONE: ${deals.length} stored, ${toEmail.length} emailed, ${toSms.length} SMS`)
-    console.log('[ROUTE] ══════════════════════════════════════════')
+    console.log(`[ROUTE] ══ DONE: ${deals.length} scanned, ${dbCount} in DB, ${toEmail.length} emailed ══`)
 
     return NextResponse.json({
       message: 'Scan complete',
       count: deals.length,
-      db_count: dbCount,
+      db_total: dbCount,
+      migration_applied: migrationDone,
+      upsert_error: upsertErr?.message ?? null,
       emailed: toEmail.length,
-      sms_sent: toSms.length,
     })
+
   } catch (err) {
-    console.error('[ROUTE] ❌ FATAL scan error:', err)
+    console.error('[ROUTE] ❌ FATAL:', String(err))
     return NextResponse.json({ error: String(err) }, { status: 500 })
   }
 }
