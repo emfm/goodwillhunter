@@ -3,6 +3,120 @@ import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { Deal } from '@/lib/types'
 
+// ── Scan progress overlay ────────────────────────────────────────────────────
+interface ScanStatusData {
+  phase: string
+  message: string
+  detail: string
+  progress: number
+  itemsFound: number
+  sgItems: number
+  ctItems: number
+  currentKeyword: string
+  keywordsDone: number
+  keywordsTotal: number
+  imagesAnalyzed: number
+  imagesTotal: number
+  error: string | null
+}
+
+const PHASE_ICONS: Record<string, string> = {
+  idle:         '💤',
+  starting:     '🔄',
+  crawling_sg:  '🛒',
+  crawling_ct:  '🏷️',
+  estimating:   '🧠',
+  analyzing:    '📸',
+  storing:      '💾',
+  done:         '✅',
+  error:        '❌',
+}
+
+function ScanProgress({ status, onClose }: { status: ScanStatusData; onClose: () => void }) {
+  const isDone = status.phase === 'done' || status.phase === 'error'
+  const icon = PHASE_ICONS[status.phase] ?? '🔄'
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center pb-8 px-4 pointer-events-none">
+      <div
+        className="pointer-events-auto w-full max-w-lg rounded-2xl border shadow-2xl overflow-hidden"
+        style={{ background: '#0d1829', borderColor: 'rgba(56,189,248,0.25)' }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 pt-4 pb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-lg">{icon}</span>
+            <span className="text-sm font-bold text-slate-200">{status.message}</span>
+          </div>
+          {isDone && (
+            <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-lg leading-none">×</button>
+          )}
+        </div>
+
+        {/* Progress bar */}
+        <div className="mx-5 h-1.5 rounded-full bg-slate-800 overflow-hidden mb-3">
+          <div
+            className="h-full rounded-full transition-all duration-500"
+            style={{
+              width: `${status.progress}%`,
+              background: status.phase === 'error' ? '#ef4444' : status.phase === 'done' ? '#22c55e' : '#38bdf8'
+            }}
+          />
+        </div>
+
+        {/* Detail */}
+        <div className="px-5 pb-3 text-xs text-slate-400">{status.detail}</div>
+
+        {/* Stats row — only show during/after crawl */}
+        {(status.itemsFound > 0 || status.phase === 'done') && (
+          <div className="flex gap-3 px-5 pb-4">
+            <div className="flex-1 rounded-lg bg-slate-900/70 border border-slate-800 px-3 py-2 text-center">
+              <div className="text-xs text-slate-500 mb-0.5">Total found</div>
+              <div className="text-lg font-black text-white">{status.itemsFound}</div>
+            </div>
+            <div className="flex-1 rounded-lg bg-slate-900/70 border border-slate-800 px-3 py-2 text-center">
+              <div className="text-xs text-slate-500 mb-0.5">ShopGoodwill</div>
+              <div className="text-lg font-black text-sky-400">{status.sgItems}</div>
+            </div>
+            <div className="flex-1 rounded-lg bg-slate-900/70 border border-slate-800 px-3 py-2 text-center">
+              <div className="text-xs text-slate-500 mb-0.5">CTBids</div>
+              <div className="text-lg font-black text-purple-400">{status.ctItems}</div>
+            </div>
+            {status.imagesTotal > 0 && (
+              <div className="flex-1 rounded-lg bg-slate-900/70 border border-slate-800 px-3 py-2 text-center">
+                <div className="text-xs text-slate-500 mb-0.5">Photos</div>
+                <div className="text-lg font-black text-amber-400">{status.imagesAnalyzed}/{status.imagesTotal}</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Keyword progress during crawl */}
+        {(status.phase === 'crawling_sg' || status.phase === 'crawling_ct') && status.keywordsTotal > 0 && (
+          <div className="px-5 pb-4">
+            <div className="flex items-center justify-between text-xs text-slate-500 mb-1.5">
+              <span>Keywords</span>
+              <span>{status.keywordsDone} / {status.keywordsTotal}</span>
+            </div>
+            <div className="h-1 rounded-full bg-slate-800 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-sky-700 transition-all duration-300"
+                style={{ width: `${Math.round((status.keywordsDone / status.keywordsTotal) * 100)}%` }}
+              />
+            </div>
+            {status.currentKeyword && (
+              <div className="text-xs text-slate-600 mt-1 truncate">
+                {status.phase === 'crawling_sg' ? '🛒 SG' : '🏷️ CT'} searching: <span className="text-slate-400">"{status.currentKeyword}"</span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Condition badge ────────────────────────────────────────────────────────────
 // ── Condition badge ───────────────────────────────────────────────────────────
 const COND_STYLES: Record<string, string> = {
   Sealed: 'bg-green-950 text-green-400 border-green-700',
@@ -210,6 +324,7 @@ const SCORES = [{ label: 'Any score', val: 0 }, { label: '50+', val: 50 }, { lab
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [deals, setDeals] = useState<Deal[]>([])
+  const [config, setConfig] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
   const [lastScan, setLastScan] = useState<string | null>(null)
@@ -222,6 +337,8 @@ export default function Dashboard() {
   const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
   const [kwOpen, setKwOpen] = useState(false)
   const [sortBy, setSortBy] = useState<'score' | 'price_asc' | 'price_desc' | 'ending'>('score')
+  const [scanStatus, setScanStatusData] = useState<ScanStatusData | null>(null)
+  const [showProgress, setShowProgress] = useState(false)
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -235,9 +352,14 @@ export default function Dashboard() {
     if (category !== 'All') params.set('category', category)
     if (minScore > 0) params.set('minScore', String(minScore))
     if (showDismissed) params.set('showDismissed', 'true')
-    const res = await fetch(`/api/deals?${params}`)
-    const data = await res.json()
-    setDeals(data)
+    try {
+      const res = await fetch(`/api/deals?${params}`)
+      if (!res.ok) { console.error('deals fetch failed', res.status, await res.text()); setLoading(false); return }
+      const data = await res.json()
+      setDeals(Array.isArray(data) ? data : (data?.deals ?? data?.data ?? []))
+    } catch (e) {
+      console.error('deals fetch error:', e)
+    }
     setLoading(false)
   }, [source, category, minScore, showDismissed])
 
@@ -245,7 +367,7 @@ export default function Dashboard() {
 
   // Load last scan time
   useEffect(() => {
-    fetch('/api/config').then(r => r.json()).catch(() => null)
+    fetch('/api/config').then(r => r.json()).then(d => setConfig(d)).catch(() => null)
     fetch('/api/deals?showDismissed=false&minScore=0')
       .then(() => {})
     // get last scan from meta endpoint
@@ -257,31 +379,50 @@ export default function Dashboard() {
     })()
   }, [])
 
+  // Poll scan progress every 1.5s while scanning
+  useEffect(() => {
+    if (!scanning) return
+    setShowProgress(true)
+    const interval = setInterval(async () => {
+      try {
+        const r = await fetch('/api/scan-progress')
+        if (r.ok) {
+          const s = await r.json()
+          setScanStatusData(s)
+          if (s.phase === 'done' || s.phase === 'error') {
+            clearInterval(interval)
+            setScanning(false)
+            if (s.phase === 'done') {
+              await loadDeals()
+              setLastScan(new Date().toISOString())
+            }
+          }
+        }
+      } catch { /* ignore polling errors */ }
+    }, 1500)
+    return () => clearInterval(interval)
+  }, [scanning, loadDeals])
+
   const triggerScan = async () => {
+    const secret = prompt('Enter your CRON_SECRET (from .env):')
+    if (!secret) return
     setScanning(true)
-    showToast('Scan started — this can take 2–5 minutes…')
-    try {
-      const secret = prompt('Enter your CRON_SECRET (from .env):')
-      if (!secret) { setScanning(false); return }
-      const res = await fetch('/api/scan', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${secret}`,
-          'Content-Type': 'application/json',
-        },
-        body: overrideKeywords.length
-          ? JSON.stringify({ keywords: overrideKeywords })
-          : undefined,
-      })
-      const data = await res.json()
-      showToast(`✅ Scan complete — ${data.count ?? 0} deals found`)
-      await loadDeals()
-      setLastScan(new Date().toISOString())
-    } catch (e) {
-      showToast('❌ Scan error — check console')
-      console.error(e)
-    }
-    setScanning(false)
+    setShowProgress(true)
+    setScanStatusData({ phase: 'starting', message: 'Initializing scan…', detail: 'Connecting to sources', progress: 1, itemsFound: 0, sgItems: 0, ctItems: 0, currentKeyword: '', keywordsDone: 0, keywordsTotal: config?.keywords?.length ?? 0, imagesAnalyzed: 0, imagesTotal: 0, error: null })
+    // Fire and forget — polling handles completion
+    fetch('/api/scan', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${secret}`,
+        'Content-Type': 'application/json',
+      },
+      body: overrideKeywords.length
+        ? JSON.stringify({ keywords: overrideKeywords })
+        : undefined,
+    }).catch(e => {
+      setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Scan failed', detail: String(e), error: String(e) } : null)
+      setScanning(false)
+    })
   }
 
   const activeBidded = deals.filter(d => d.bidded && !d.dismissed).length
@@ -307,6 +448,14 @@ export default function Dashboard() {
         <div className="fixed top-4 right-4 z-50 bg-slate-800 border border-slate-600 text-sm text-slate-200 px-4 py-3 rounded-lg shadow-xl slide-in">
           {toast}
         </div>
+      )}
+
+      {/* Scan progress overlay */}
+      {showProgress && scanStatus && (
+        <ScanProgress
+          status={scanStatus}
+          onClose={() => { setShowProgress(false); setScanStatusData(null) }}
+        />
       )}
 
       {/* Header */}
