@@ -75,12 +75,20 @@ export async function POST(req: NextRequest) {
       return row
     })
 
-    console.log(`[ROUTE] Upserting ${rows.length} rows (migration cols: ${migrationDone ? 'included' : 'skipped'})`)
-    console.log(`[ROUTE] Sample: "${rows[0]?.title}" | ${rows[0]?.source} | $${rows[0]?.current_bid}`)
+    // Deduplicate by URL — same item can match multiple keywords
+    const seenUrls = new Set<string>()
+    const dedupedRows = rows.filter(r => {
+      const url = r.url as string
+      if (seenUrls.has(url)) return false
+      seenUrls.add(url)
+      return true
+    })
+    console.log(`[ROUTE] Upserting ${dedupedRows.length} rows (${rows.length - dedupedRows.length} dupes removed, migration: ${migrationDone ? 'yes' : 'no'})`)
+    console.log(`[ROUTE] Sample: "${dedupedRows[0]?.title}" | ${dedupedRows[0]?.source} | $${dedupedRows[0]?.current_bid}`)
 
     const { error: upsertErr } = await db
       .from('deals')
-      .upsert(rows as any, { onConflict: 'url', ignoreDuplicates: false })
+      .upsert(dedupedRows as any, { onConflict: 'url', ignoreDuplicates: false })
 
     if (upsertErr) {
       console.error('[ROUTE] ❌ UPSERT FAILED:', JSON.stringify(upsertErr))
