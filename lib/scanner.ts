@@ -19,7 +19,7 @@ function jitter(minMs: number, maxMs: number) {
 // Anthropic API concurrency limiter — max 3 simultaneous calls to avoid 429s.
 // With 50+ items we'd fire 3+ concurrent batches otherwise.
 function makeAnthropicLimiter() {
-  const MAX = 3
+  const MAX = 8
   let running = 0
   const queue: Array<() => void> = []
   return async function<T>(fn: () => Promise<T>): Promise<T> {
@@ -544,8 +544,8 @@ async function estimateValueBatch(titles: string[]): Promise<Array<{ value: numb
     })
 
     if (res.status === 429) {
-      console.warn('[VALUE] 429 rate limit — waiting 5s before retry')
-      await new Promise(r => setTimeout(r, 5000))
+      console.warn('[VALUE] 429 rate limit — waiting 3s before retry')
+      await new Promise(r => setTimeout(r, 3000))
       const retry = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
@@ -745,7 +745,7 @@ function scoreDeal(
 // This is intentional: SG and CTBids will ban you for burst traffic.
 // Everything AFTER the crawl (value estimation, image analysis) is fully
 // parallel since it only hits Anthropic's API, not the auction sites.
-const MAX_IMAGE_CANDIDATES = 40
+const MAX_IMAGE_CANDIDATES = 15
 
 export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[]> {
   resetStopFlag()
@@ -766,7 +766,8 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     if (config.sources.includes('shopgoodwill')) {
       await setScanStatus({ phase: 'crawling_sg', message: `ShopGoodwill: "${kw}"`, detail: `keyword ${kwIdx + 1} / ${totalKeywords}`, currentKeyword: kw, keywordsDone: kwIdx, progress: pct })
       try {
-        const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
+        const sgPagesThisKw = (Date.now() - scanStart) > 120_000 ? 1 : (config.pages_per_keyword ?? 2)
+        const items = await searchShopGoodwill(kw, config.max_search_price, sgPagesThisKw)
         const fresh = items.filter(i => !seen.has(i.url))
         fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
         console.log(`  [SG] "${kw}": ${items.length} (${fresh.length} new)`)
@@ -777,7 +778,8 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     if (config.sources.includes('ctbids')) {
       await setScanStatus({ phase: 'crawling_ct', message: `CTBids: "${kw}"`, detail: `keyword ${kwIdx + 1} / ${totalKeywords}`, currentKeyword: kw, keywordsDone: kwIdx, progress: pct })
       try {
-        const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
+        const ctPagesThisKw = (Date.now() - scanStart) > 150_000 ? 1 : (config.pages_per_keyword ?? 2)
+        const items = await searchCTBids(kw, config.max_search_price, ctPagesThisKw)
         const fresh = items.filter(i => !seen.has(i.url))
         fresh.forEach(i => { seen.add(i.url); rawItems.push(i) })
         console.log(`  [CT] "${kw}": ${items.length} (${fresh.length} new)`)
@@ -787,7 +789,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     await setScanStatus({ keywordsDone: kwIdx + 1, itemsFound: rawItems.length, sgItems: rawItems.filter(i => i.source === 'ShopGoodwill').length, ctItems: rawItems.filter(i => i.source === 'CTBids').length })
     if (isStopRequested()) { console.log('[SCAN] Stopped after keyword', kwIdx + 1); break }
     // Pause between keywords — looks like a human browsing
-    if (kwIdx < config.keywords.length - 1) await jitter(800, 1800)
+    if (kwIdx < config.keywords.length - 1) await jitter(400, 900)
   }
 
   const sgCount = rawItems.filter(i => i.source === 'ShopGoodwill').length
@@ -801,14 +803,30 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     return []
   }
 
-  const candidates = rawItems.filter(i => i.title?.trim())
+  const allItems = rawItems.filter(i => i.title?.trim())
+
+  // ── Cap candidates to avoid timeout ─────────────────────────────────────────
+  // Sort by keyword match quality first: items with high_value_keywords bubble up
+  // then sort by bid price (sweet spot $1–$50 = best ROI potential)
+  const MAX_ESTIMATE = 250
+  const hvkSet = new Set((config.high_value_keywords ?? []).map(w => w.toLowerCase()))
+  const ranked = [...allItems].sort((a, b) => {
+    const aHvk = hvkSet.size && [...hvkSet].some(w => a.title.toLowerCase().includes(w)) ? 1 : 0
+    const bHvk = hvkSet.size && [...hvkSet].some(w => b.title.toLowerCase().includes(w)) ? 1 : 0
+    if (aHvk !== bHvk) return bHvk - aHvk
+    // prefer mid-range bids ($1–$80) over free or very expensive
+    const aScore = a.current_bid >= 1 && a.current_bid <= 80 ? 1 : 0
+    const bScore = b.current_bid >= 1 && b.current_bid <= 80 ? 1 : 0
+    return bScore - aScore
+  })
+  const candidates = ranked.slice(0, MAX_ESTIMATE)
+  console.log(`[SCAN] Capped to ${candidates.length}/${allItems.length} candidates for estimation`)
 
   // ── Phase 2: Value estimation ────────────────────────────────────────────────
   // Step 1: PriceCharting in parallel for all items (real sold data, free, fast)
-  // Step 2: Claude Haiku in parallel for anything PriceCharting couldn't match
-  // Result: real comps where available, AI estimates as fallback
+  // Step 2: Claude Haiku for anything PriceCharting couldn't match (max 3 concurrent)
   console.log(`[SCAN] Looking up ${candidates.length} items (PriceCharting + Claude Haiku)...`)
-  await setScanStatus({ phase: 'estimating', message: 'Looking up real market prices', detail: `${candidates.length} items via PriceCharting + Claude Haiku`, progress: 42 })
+  await setScanStatus({ phase: 'estimating', message: 'Looking up real market prices', detail: `${candidates.length} of ${allItems.length} items`, progress: 42 })
 
   const valMap = new Map<string, { value: number; source: string }>()
 
@@ -847,8 +865,14 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       else batchItems.forEach(item => valMap.set(item.url, valueCache.get(item.title)!))
     }
     // Max 3 concurrent Anthropic calls — prevents 429 rate limit errors
+    // Hard time budget: stop sending new batches if we're past 160s
     await Promise.all(batches.map(({ items, titles }) =>
       anthropicLimit(async () => {
+        if (Date.now() - scanStart > 160_000) {
+          console.warn('[SCAN] Estimation time budget exceeded, skipping batch')
+          items.forEach(item => valMap.set(item.url, { value: 0, source: '' }))
+          return
+        }
         const results = await estimateValueBatch(titles)
         let ri = 0
         for (const item of items) {
@@ -888,12 +912,12 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
 
   if (analyzeImages && imgCandidates.length > 0) {
     const timeElapsed = Date.now() - scanStart
-    const timeLeft = 280_000 - timeElapsed  // stay 20s inside the 300s limit
-    const maxBatches = Math.floor(timeLeft / 4500)  // conservative 4.5s per batch of 5
-    const safeCount = Math.min(imgCandidates.length, maxBatches * 5)
+    const timeLeft = 220_000 - timeElapsed  // 40s safety buffer before 300s limit
+    // With 8 concurrent and ~2s per image, estimate 2.5s per image to be safe
+    const safeCount = Math.min(imgCandidates.length, Math.max(0, Math.floor(timeLeft / 2500)))
     const toAnalyze = imgCandidates.slice(0, safeCount)
 
-    console.log(`[SCAN] Analyzing ${toAnalyze.length} images (${(timeElapsed/1000).toFixed(1)}s elapsed, ${(timeLeft/1000).toFixed(1)}s budget remaining)`)
+    console.log(`[SCAN] Analyzing ${toAnalyze.length} images (${(timeElapsed/1000).toFixed(1)}s elapsed, ${(timeLeft/1000).toFixed(1)}s left)`)
     await setScanStatus({ phase: 'analyzing', message: 'Analyzing photos with Claude Vision', detail: `Top ${toAnalyze.length} candidates`, progress: 62, imagesTotal: toAnalyze.length, imagesAnalyzed: 0 })
 
     // Max 3 concurrent image analyses — same Anthropic rate limit applies
