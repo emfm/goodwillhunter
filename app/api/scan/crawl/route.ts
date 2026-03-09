@@ -42,10 +42,16 @@ export async function POST(req: NextRequest) {
     // Create table if missing (idempotent)
     try { await db.rpc('exec_sql', { sql: `ALTER TABLE raw_scan_items DISABLE ROW LEVEL SECURITY;` }) } catch { /* ok */ }
 
-    // Deduplicate by URL before inserting — same item can appear under multiple keywords
+    // Deduplicate by URL — same item can appear under multiple keywords
     const seenUrls = new Set<string>()
     const uniqueItems = items.filter(item => { if (seenUrls.has(item.url)) return false; seenUrls.add(item.url); return true })
     console.log(`[CRAWL] ${items.length} items → ${uniqueItems.length} after dedup`)
+
+    // Delete-then-insert avoids ALL upsert conflict issues
+    const { error: delErr } = await db.from('raw_scan_items').delete().eq('scan_id', scanId)
+    if (delErr && delErr.code === '42P01') {
+      return NextResponse.json({ error: 'Table raw_scan_items not found. Please run migration.sql in Supabase.' }, { status: 500 })
+    }
 
     const CHUNK = 500
     let stored = 0
@@ -63,13 +69,9 @@ export async function POST(req: NextRequest) {
         matched_keyword: item.matched_keyword,
         match_type: item.match_type ?? 'text',
       }))
-      const { error, count } = await db.from('raw_scan_items').upsert(chunk, { onConflict: 'url' })
+      const { error } = await db.from('raw_scan_items').insert(chunk)
       if (error) {
-        console.error(`[CRAWL] upsert chunk ${i}-${i+CHUNK} error:`, error.message, error.code)
-        // If table doesn't exist, return error so user knows to run migration
-        if (error.code === '42P01') {
-          return NextResponse.json({ error: 'Table raw_scan_items not found. Please run migration.sql in Supabase.' }, { status: 500 })
-        }
+        console.error(`[CRAWL] insert chunk ${i}-${i+CHUNK} error:`, error.message, error.code)
       } else {
         stored += chunk.length
       }
