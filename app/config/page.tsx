@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { Deal } from '@/lib/types'
+import { createClient } from '@supabase/supabase-js'
 
 // ── Scan progress overlay ────────────────────────────────────────────────────
 interface ScanStatusData {
@@ -17,6 +18,9 @@ interface ScanStatusData {
   keywordsTotal: number
   imagesAnalyzed: number
   imagesTotal: number
+  scanId?: string
+  realPrices?: number
+  aiPrices?: number
   error: string | null
 }
 
@@ -114,6 +118,20 @@ function ScanProgress({ status, onClose, onStop }: { status: ScanStatusData; onC
         })}
       </div>
 
+      {/* Valuation source mini-stats — show during/after estimating */}
+      {(status.realPrices ?? 0) + (status.aiPrices ?? 0) > 0 && (
+        <div className="mx-4 mb-2 flex gap-2 text-xs">
+          <div className="flex-1 rounded px-2 py-1.5 text-center" style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.15)' }}>
+            <span className="text-green-400 font-bold">{status.realPrices}</span>
+            <span className="text-slate-500 ml-1">real comps</span>
+          </div>
+          <div className="flex-1 rounded px-2 py-1.5 text-center" style={{ background: 'rgba(56,189,248,0.06)', border: '1px solid rgba(56,189,248,0.1)' }}>
+            <span className="text-sky-400 font-bold">{status.aiPrices}</span>
+            <span className="text-slate-500 ml-1">AI estimates</span>
+          </div>
+        </div>
+      )}
+
       {/* Progress bar */}
       <div className="mx-4 mb-3 mt-1 h-1 rounded-full bg-slate-800 overflow-hidden">
         <div className="h-full rounded-full transition-all duration-700" style={{ width: `${status.progress}%`, background: barColor }} />
@@ -169,7 +187,7 @@ function ScoreBadge({ score }: { score: number }) {
 }
 
 // ── Deal card ─────────────────────────────────────────────────────────────────
-function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: string) => void; onBid: (id: string) => void }) {
+function DealCard({ deal, onDismiss, onBid, onStar, isNew }: { deal: Deal; onDismiss: (id: string) => void; onBid: (id: string) => void; onStar: (id: string, starred: boolean) => void; isNew?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const [dismissing, setDismissing] = useState(false)
   const roi = deal.current_bid > 0
@@ -196,6 +214,16 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
     })
     onBid(deal.id)
     window.open(deal.url, '_blank')
+  }
+
+  const handleStar = async () => {
+    const next = !deal.starred
+    await fetch(`/api/deals/${deal.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ starred: next }),
+    })
+    onStar(deal.id, next)
   }
 
   if (dismissing) return null
@@ -229,12 +257,26 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
             {deal.deal_score === 100 ? '🔥' : deal.deal_score}
           </div>
         </div>
-        {/* Source badge */}
-        <div className="absolute top-2 left-2">
+        {/* Source badge + NEW badge */}
+        <div className="absolute top-2 left-2 flex gap-1.5">
           <span className="text-xs px-2 py-0.5 rounded bg-black/70 text-sky-400 border border-sky-900">
             {deal.source}
           </span>
+          {isNew && (
+            <span className="text-xs px-2 py-0.5 rounded bg-amber-500 text-black font-black tracking-wide">
+              NEW
+            </span>
+          )}
         </div>
+        {/* Star button */}
+        <button
+          onClick={handleStar}
+          className="absolute top-2 right-10 w-7 h-7 rounded-full flex items-center justify-center transition-all"
+          style={{ background: deal.starred ? 'rgba(251,191,36,0.25)' : 'rgba(0,0,0,0.5)', border: deal.starred ? '1px solid rgba(251,191,36,0.5)' : '1px solid transparent' }}
+          title={deal.starred ? 'Unstar' : 'Star this deal'}
+        >
+          <span className="text-sm">{deal.starred ? '⭐' : '☆'}</span>
+        </button>
         {/* Bidded indicator */}
         {deal.bidded && (
           <div className="absolute bottom-2 left-2">
@@ -338,8 +380,13 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
           <button onClick={handleBid} className="btn btn-green flex-1 justify-center text-xs">
             🎯 Bid Now
           </button>
-          <button onClick={handleDismiss} className="btn btn-ghost text-xs px-3">
-            ✕
+          <button
+            onClick={handleDismiss}
+            className="btn btn-ghost text-xs px-3 group relative"
+            title="Hide this deal"
+          >
+            <span className="group-hover:hidden">✕</span>
+            <span className="hidden group-hover:inline text-slate-400">Hide</span>
           </button>
         </div>
       </div>
@@ -349,12 +396,14 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
 
 // ── Filter bar ────────────────────────────────────────────────────────────────
 const SOURCES = ['All', 'ShopGoodwill', 'CTBids']
-const CATEGORIES = ['All', 'Atari', 'Console Games', 'Big Box PC Game', 'Signed / Autograph', 'Trading Cards', 'Vintage Electronics', 'General']
+// Starred filter is handled via showStarredOnly state
+const CATEGORIES = ['All', 'Computer Games', 'Trading Cards', 'Signatures', 'Comics', 'Vintage Electronics', 'General', 'Other']
 const SCORES = [{ label: 'Any score', val: 0 }, { label: '50+', val: 50 }, { label: '60+', val: 60 }, { label: '70+ 🔥', val: 70 }, { label: '80+ 💎', val: 80 }]
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [deals, setDeals] = useState<Deal[]>([])
+  const [lastScanId, setLastScanId] = useState<string | null>(null)
   const [config, setConfig] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
@@ -363,6 +412,7 @@ export default function Dashboard() {
   const [category, setCategory] = useState('All')
   const [minScore, setMinScore] = useState(0)
   const [showDismissed, setShowDismissed] = useState(false)
+  const [showStarredOnly, setShowStarredOnly] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [kwInput, setKwInput] = useState('')
   const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
@@ -410,27 +460,48 @@ export default function Dashboard() {
     })()
   }, [])
 
-  // Poll scan progress every 1.5s while scanning
+  // Poll scan progress every 2s — reads Supabase directly to avoid Vercel Lambda isolation
   useEffect(() => {
     if (!scanning) return
     setShowProgress(true)
+    const db = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    )
     const interval = setInterval(async () => {
       try {
-        const r = await fetch('/api/scan-progress')
-        if (r.ok) {
-          const s = await r.json()
-          setScanStatusData(s)
-          if (s.phase === 'done' || s.phase === 'error') {
-            clearInterval(interval)
-            setScanning(false)
-            if (s.phase === 'done') {
-              await loadDeals()
-              setLastScan(new Date().toISOString())
-            }
+        const { data } = await db.from('scan_status').select('*').eq('id', 1).single()
+        if (!data) return
+        const s: ScanStatusData = {
+          phase: data.phase ?? 'idle',
+          message: data.message ?? '',
+          detail: data.detail ?? '',
+          progress: data.progress ?? 0,
+          itemsFound: data.items_found ?? 0,
+          sgItems: data.sg_items ?? 0,
+          ctItems: data.ct_items ?? 0,
+          currentKeyword: data.current_keyword ?? '',
+          keywordsDone: data.keywords_done ?? 0,
+          keywordsTotal: data.keywords_total ?? 0,
+          imagesAnalyzed: data.images_analyzed ?? 0,
+          imagesTotal: data.images_total ?? 0,
+          realPrices: data.real_prices ?? 0,
+          aiPrices: data.ai_prices ?? 0,
+          scanId: data.scan_id ?? undefined,
+          error: data.error ?? null,
+        }
+        setScanStatusData(s)
+        if (s.phase === 'done' || s.phase === 'error') {
+          clearInterval(interval)
+          setScanning(false)
+          if (s.phase === 'done') {
+            await loadDeals()
+            setLastScan(new Date().toISOString())
+            if (s.scanId) setLastScanId(s.scanId)
           }
         }
-      } catch { /* ignore polling errors */ }
-    }, 1500)
+      } catch { /* ignore */ }
+    }, 2000)
     return () => clearInterval(interval)
   }, [scanning, loadDeals])
 
@@ -451,14 +522,42 @@ export default function Dashboard() {
     setScanning(true)
     setShowProgress(true)
     setScanStatusData({ phase: 'starting', message: 'Initializing scan…', detail: 'Connecting to sources', progress: 1, itemsFound: 0, sgItems: 0, ctItems: 0, currentKeyword: '', keywordsDone: 0, keywordsTotal: config?.keywords?.length ?? 0, imagesAnalyzed: 0, imagesTotal: 0, error: null })
-    fetch('/api/scan', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
-      body: overrideKeywords.length ? JSON.stringify({ keywords: overrideKeywords }) : undefined,
-    }).catch(e => {
-      setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Scan failed', detail: String(e), error: String(e) } : null)
+
+    const headers: Record<string, string> = { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' }
+    const kwBody = overrideKeywords.length ? JSON.stringify({ keywords: overrideKeywords }) : undefined
+
+    // Phase 1: Crawl — await it so we get scanId back before firing estimate
+    let scanId: string | null = null
+    try {
+      const r1 = await fetch('/api/scan/crawl', { method: 'POST', headers, body: kwBody })
+      if (!r1.ok) { const t = await r1.text(); throw new Error(`Crawl failed (${r1.status}): ${t}`) }
+      const d1 = await r1.json()
+      if (d1.error) throw new Error(d1.error)
+      scanId = d1.scanId
+      if (d1.count === 0) {
+        setScanStatusData(s => s ? { ...s, phase: 'done', message: 'No items found', detail: 'Try different keywords or check source settings', progress: 100 } : null)
+        setScanning(false)
+        return
+      }
+    } catch (e) {
+      setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Crawl failed', detail: String(e), error: String(e) } : null)
       setScanning(false)
-    })
+      return
+    }
+
+    // Phase 2 + 3: fire estimate, then chain finalize — polling shows live progress
+    fetch('/api/scan/estimate', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
+      .then(async r2 => {
+        if (!r2.ok) throw new Error(`Estimate failed: ${r2.status}`)
+        return fetch('/api/scan/finalize', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
+      })
+      .then(async r3 => {
+        if (r3 && !r3.ok) throw new Error(`Finalize failed: ${r3.status}`)
+      })
+      .catch(e => {
+        setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Scan failed', detail: String(e), error: String(e) } : null)
+        setScanning(false)
+      })
   }
 
   const stopScan = async () => {
@@ -472,8 +571,16 @@ export default function Dashboard() {
   }
 
   const activeBidded = deals.filter(d => d.bidded && !d.dismissed).length
+  const starredCount = deals.filter(d => d.starred && !d.dismissed).length
+
+  const handleStar = (id: string, starred: boolean) => {
+    setDeals(prev => prev.map(d => d.id === id ? { ...d, starred } : d))
+  }
 
   const sortedDeals = [...deals].sort((a, b) => {
+    // Starred always float to top
+    if (a.starred && !b.starred) return -1
+    if (!a.starred && b.starred) return 1
     if (sortBy === 'score')      return b.deal_score - a.deal_score
     if (sortBy === 'price_asc')  return a.current_bid - b.current_bid
     if (sortBy === 'price_desc') return b.current_bid - a.current_bid
@@ -485,6 +592,7 @@ export default function Dashboard() {
     return 0
   })
   const hotDeals = deals.filter(d => d.deal_score >= 70 && !d.dismissed).length
+  const displayDeals = showStarredOnly ? sortedDeals.filter(d => d.starred) : sortedDeals
   const avgScore = deals.length ? Math.round(deals.reduce((s, d) => s + d.deal_score, 0) / deals.length) : 0
 
   return (
@@ -530,6 +638,12 @@ export default function Dashboard() {
               <div className="text-xs px-3 py-1.5 rounded-full bg-green-950 border border-green-800">
                 <span className="text-green-400">🔥 Hot </span>
                 <span className="text-green-300 font-bold">{hotDeals}</span>
+              </div>
+            )}
+            {starredCount > 0 && (
+              <div className="text-xs px-3 py-1.5 rounded-full bg-amber-950 border border-amber-800">
+                <span className="text-amber-400">⭐ </span>
+                <span className="text-amber-300 font-bold">{starredCount}</span>
               </div>
             )}
             {activeBidded > 0 && (
@@ -686,7 +800,7 @@ export default function Dashboard() {
             <div className="w-10 h-10 border-3 border-sky-500 border-t-transparent rounded-full spinner" style={{ borderWidth: 3 }} />
             <div className="text-slate-500 text-sm">Loading deals…</div>
           </div>
-        ) : deals.length === 0 ? (
+        ) : displayDeals.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-32 gap-4 text-center">
             <div className="text-6xl">🎯</div>
             <div className="text-slate-300 font-semibold text-lg">No deals found</div>
@@ -697,12 +811,14 @@ export default function Dashboard() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {sortedDeals.map(deal => (
+            {displayDeals.map(deal => (
               <DealCard
                 key={deal.id}
                 deal={deal}
+                isNew={!!(lastScanId && deal.scan_id === lastScanId)}
                 onDismiss={id => setDeals(prev => prev.filter(d => d.id !== id))}
                 onBid={id => setDeals(prev => prev.map(d => d.id === id ? { ...d, bidded: true } : d))}
+                onStar={handleStar}
               />
             ))}
           </div>
