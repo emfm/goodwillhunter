@@ -545,19 +545,22 @@ export default function Dashboard() {
       return
     }
 
-    // Phase 2 + 3: fire estimate, then chain finalize — polling shows live progress
-    fetch('/api/scan/estimate', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
-      .then(async r2 => {
-        if (!r2.ok) throw new Error(`Estimate failed: ${r2.status}`)
-        return fetch('/api/scan/finalize', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
-      })
-      .then(async r3 => {
-        if (r3 && !r3.ok) throw new Error(`Finalize failed: ${r3.status}`)
-      })
-      .catch(e => {
-        setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Scan failed', detail: String(e), error: String(e) } : null)
-        setScanning(false)
-      })
+    // Phase 2 + 3: estimate then finalize — each awaited so we can load deals at the end
+    try {
+      const r2 = await fetch('/api/scan/estimate', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
+      if (!r2.ok) throw new Error(`Estimate failed: ${r2.status}`)
+
+      const r3 = await fetch('/api/scan/finalize', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
+      if (!r3.ok) throw new Error(`Finalize failed: ${r3.status}`)
+    } catch (e) {
+      console.error('[SCAN] phase 2/3 error:', e)
+      // Don't bail — finalize may have partially succeeded; fall through to loadDeals
+    }
+
+    // Always load deals when scan completes, regardless of polling state
+    await loadDeals()
+    setLastScan(new Date().toISOString())
+    setScanning(false)
   }
 
   const stopScan = async () => {
