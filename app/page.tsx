@@ -268,14 +268,15 @@ function DealCard({ deal, onDismiss, onBid, onStar, isNew }: { deal: Deal; onDis
             </span>
           )}
         </div>
-        {/* Star button */}
+        {/* Watchlist button */}
         <button
           onClick={handleStar}
-          className="absolute top-2 right-10 w-7 h-7 rounded-full flex items-center justify-center transition-all"
-          style={{ background: deal.starred ? 'rgba(251,191,36,0.25)' : 'rgba(0,0,0,0.5)', border: deal.starred ? '1px solid rgba(251,191,36,0.5)' : '1px solid transparent' }}
-          title={deal.starred ? 'Unstar' : 'Star this deal'}
+          className="absolute top-2 right-10 rounded flex items-center justify-center gap-1 px-2 py-0.5 text-xs font-semibold transition-all"
+          style={{ background: deal.starred ? 'rgba(251,191,36,0.9)' : 'rgba(0,0,0,0.65)', color: deal.starred ? '#000' : '#94a3b8', border: deal.starred ? '1px solid rgba(251,191,36,0.5)' : '1px solid rgba(255,255,255,0.15)' }}
+          title={deal.starred ? 'Remove from watchlist' : 'Add to watchlist'}
         >
-          <span className="text-sm">{deal.starred ? '⭐' : '☆'}</span>
+          <span>{deal.starred ? '★' : '☆'}</span>
+          <span>{deal.starred ? 'Saved' : 'Watch'}</span>
         </button>
         {/* Bidded indicator */}
         {deal.bidded && (
