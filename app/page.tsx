@@ -418,7 +418,7 @@ export default function Dashboard() {
   const [kwInput, setKwInput] = useState('')
   const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
   const [kwOpen, setKwOpen] = useState(false)
-  const [sortBy, setSortBy] = useState<'score' | 'roi' | 'price_asc' | 'price_desc' | 'ending'>('score')
+  const [sortBy, setSortBy] = useState<'new' | 'score' | 'roi' | 'price_asc' | 'price_desc' | 'ending'>('new')
   const [scanStatus, setScanStatusData] = useState<ScanStatusData | null>(null)
   const [showProgress, setShowProgress] = useState(false)
 
@@ -585,6 +585,12 @@ export default function Dashboard() {
     // Starred always float to top
     if (a.starred && !b.starred) return -1
     if (!a.starred && b.starred) return 1
+    if (sortBy === 'new') {
+      const aNew = lastScanId && a.scan_id === lastScanId ? 1 : 0
+      const bNew = lastScanId && b.scan_id === lastScanId ? 1 : 0
+      if (bNew !== aNew) return bNew - aNew
+      return b.deal_score - a.deal_score  // within same group, sort by score
+    }
     if (sortBy === 'score')      return b.deal_score - a.deal_score
     if (sortBy === 'roi') {
       // Score by absolute profit potential, not % — avoids $1 bid items dominating
@@ -795,12 +801,13 @@ export default function Dashboard() {
           <div className="flex gap-1 ml-auto items-center">
             <span className="text-xs text-slate-600 mr-1">Sort:</span>
             {([
+              { val: 'new',        label: '✨ New' },
               { val: 'score',      label: '🏆 Score' },
               { val: 'roi',        label: '📈 ROI' },
               { val: 'price_asc',  label: '💰 Cheapest' },
               { val: 'price_desc', label: '💰 Priciest' },
               { val: 'ending',     label: '⏱ Ending' },
-            ] as const).map((s: { val: 'score' | 'roi' | 'price_asc' | 'price_desc' | 'ending', label: string }) => (
+            ] as const).map((s: { val: 'new' | 'score' | 'roi' | 'price_asc' | 'price_desc' | 'ending', label: string }) => (
               <button key={s.val} onClick={() => setSortBy(s.val)}
                 className={`text-xs px-2.5 py-1.5 rounded-md font-semibold transition-all ${
                   sortBy === s.val ? 'bg-sky-900 text-sky-300 border border-sky-700' : 'text-slate-500 hover:text-slate-300'
