@@ -17,6 +17,9 @@ interface ScanStatusData {
   keywordsTotal: number
   imagesAnalyzed: number
   imagesTotal: number
+  scanId?: string
+  realPrices?: number
+  aiPrices?: number
   error: string | null
 }
 
@@ -32,86 +35,131 @@ const PHASE_ICONS: Record<string, string> = {
   error:        '❌',
 }
 
-function ScanProgress({ status, onClose }: { status: ScanStatusData; onClose: () => void }) {
+function ScanProgress({ status, onClose, onStop }: { status: ScanStatusData; onClose: () => void; onStop: () => void }) {
   const isDone = status.phase === 'done' || status.phase === 'error'
+  const isRunning = !isDone
   const icon = PHASE_ICONS[status.phase] ?? '🔄'
+  const barColor = status.phase === 'error' ? '#ef4444' : status.phase === 'done' ? '#22c55e' : '#38bdf8'
+
+  const PHASE_LABELS: Record<string, string> = {
+    starting: 'Starting up…',
+    crawling_sg: 'Searching ShopGoodwill',
+    crawling_ct: 'Searching CTBids',
+    estimating: 'Looking up prices',
+    analyzing: 'Analyzing photos',
+    storing: 'Saving to database',
+    done: 'Scan complete',
+    error: 'Scan failed',
+  }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center pb-8 px-4 pointer-events-none">
-      <div
-        className="pointer-events-auto w-full max-w-lg rounded-2xl border shadow-2xl overflow-hidden"
-        style={{ background: '#0d1829', borderColor: 'rgba(56,189,248,0.25)' }}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 pt-4 pb-2">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">{icon}</span>
-            <span className="text-sm font-bold text-slate-200">{status.message}</span>
-          </div>
+    <div className="fixed bottom-6 right-6 z-50 w-96 rounded-2xl border shadow-2xl overflow-hidden" style={{ background: '#0a111f', borderColor: 'rgba(56,189,248,0.2)' }}>
+
+      {/* Title bar */}
+      <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
+        <div className="flex items-center gap-2">
+          {isRunning && <span className="inline-block w-2 h-2 rounded-full bg-sky-400 animate-pulse" />}
+          <span className="text-sm font-bold text-slate-100">{isRunning ? 'Scanning…' : status.phase === 'done' ? '✅ Done' : '❌ Failed'}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {isRunning && (
+            <button
+              onClick={onStop}
+              className="text-xs px-2.5 py-1 rounded-lg border font-medium transition-colors"
+              style={{ borderColor: 'rgba(239,68,68,0.4)', color: '#f87171', background: 'rgba(239,68,68,0.08)' }}
+              onMouseEnter={e => { (e.target as HTMLElement).style.background = 'rgba(239,68,68,0.18)' }}
+              onMouseLeave={e => { (e.target as HTMLElement).style.background = 'rgba(239,68,68,0.08)' }}
+            >
+              ■ Stop
+            </button>
+          )}
           {isDone && (
-            <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-lg leading-none">×</button>
+            <button onClick={onClose} className="text-slate-500 hover:text-slate-300 text-xl leading-none px-1">×</button>
           )}
         </div>
-
-        {/* Progress bar */}
-        <div className="mx-5 h-1.5 rounded-full bg-slate-800 overflow-hidden mb-3">
-          <div
-            className="h-full rounded-full transition-all duration-500"
-            style={{
-              width: `${status.progress}%`,
-              background: status.phase === 'error' ? '#ef4444' : status.phase === 'done' ? '#22c55e' : '#38bdf8'
-            }}
-          />
-        </div>
-
-        {/* Detail */}
-        <div className="px-5 pb-3 text-xs text-slate-400">{status.detail}</div>
-
-        {/* Stats row — only show during/after crawl */}
-        {(status.itemsFound > 0 || status.phase === 'done') && (
-          <div className="flex gap-3 px-5 pb-4">
-            <div className="flex-1 rounded-lg bg-slate-900/70 border border-slate-800 px-3 py-2 text-center">
-              <div className="text-xs text-slate-500 mb-0.5">Total found</div>
-              <div className="text-lg font-black text-white">{status.itemsFound}</div>
-            </div>
-            <div className="flex-1 rounded-lg bg-slate-900/70 border border-slate-800 px-3 py-2 text-center">
-              <div className="text-xs text-slate-500 mb-0.5">ShopGoodwill</div>
-              <div className="text-lg font-black text-sky-400">{status.sgItems}</div>
-            </div>
-            <div className="flex-1 rounded-lg bg-slate-900/70 border border-slate-800 px-3 py-2 text-center">
-              <div className="text-xs text-slate-500 mb-0.5">CTBids</div>
-              <div className="text-lg font-black text-purple-400">{status.ctItems}</div>
-            </div>
-            {status.imagesTotal > 0 && (
-              <div className="flex-1 rounded-lg bg-slate-900/70 border border-slate-800 px-3 py-2 text-center">
-                <div className="text-xs text-slate-500 mb-0.5">Photos</div>
-                <div className="text-lg font-black text-amber-400">{status.imagesAnalyzed}/{status.imagesTotal}</div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Keyword progress during crawl */}
-        {(status.phase === 'crawling_sg' || status.phase === 'crawling_ct') && status.keywordsTotal > 0 && (
-          <div className="px-5 pb-4">
-            <div className="flex items-center justify-between text-xs text-slate-500 mb-1.5">
-              <span>Keywords</span>
-              <span>{status.keywordsDone} / {status.keywordsTotal}</span>
-            </div>
-            <div className="h-1 rounded-full bg-slate-800 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-sky-700 transition-all duration-300"
-                style={{ width: `${Math.round((status.keywordsDone / status.keywordsTotal) * 100)}%` }}
-              />
-            </div>
-            {status.currentKeyword && (
-              <div className="text-xs text-slate-600 mt-1 truncate">
-                {status.phase === 'crawling_sg' ? '🛒 SG' : '🏷️ CT'} searching: <span className="text-slate-400">"{status.currentKeyword}"</span>
-              </div>
-            )}
-          </div>
-        )}
       </div>
+
+      {/* Phase steps */}
+      <div className="px-4 pt-3 pb-2 space-y-2">
+        {(['crawling_sg', 'crawling_ct', 'estimating', 'analyzing', 'storing'] as const).map(phase => {
+          const phaseOrder = ['starting', 'crawling_sg', 'crawling_ct', 'estimating', 'analyzing', 'storing', 'done']
+          const currentIdx = phaseOrder.indexOf(status.phase)
+          const thisIdx = phaseOrder.indexOf(phase)
+          const isActive = status.phase === phase
+          const isDoneStep = currentIdx > thisIdx || status.phase === 'done'
+          const isPending = currentIdx < thisIdx
+
+          return (
+            <div key={phase} className="flex items-center gap-3">
+              <div className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 text-xs"
+                style={{
+                  background: isDoneStep ? 'rgba(34,197,94,0.15)' : isActive ? 'rgba(56,189,248,0.15)' : 'rgba(255,255,255,0.04)',
+                  border: `1px solid ${isDoneStep ? 'rgba(34,197,94,0.4)' : isActive ? 'rgba(56,189,248,0.5)' : 'rgba(255,255,255,0.08)'}`,
+                  color: isDoneStep ? '#4ade80' : isActive ? '#38bdf8' : '#475569',
+                }}>
+                {isDoneStep ? '✓' : isActive ? '●' : '·'}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium" style={{ color: isDoneStep ? '#4ade80' : isActive ? '#e2e8f0' : '#475569' }}>
+                  {PHASE_LABELS[phase] ?? phase}
+                </div>
+                {isActive && status.detail && (
+                  <div className="text-xs text-slate-500 truncate mt-0.5">{status.detail}</div>
+                )}
+              </div>
+              {isActive && phase === 'crawling_sg' || isActive && phase === 'crawling_ct' ? (
+                <div className="text-xs text-slate-500 flex-shrink-0">{status.keywordsDone}/{status.keywordsTotal}</div>
+              ) : isActive && phase === 'analyzing' && status.imagesTotal > 0 ? (
+                <div className="text-xs text-slate-500 flex-shrink-0">{status.imagesAnalyzed}/{status.imagesTotal}</div>
+              ) : null}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Valuation source mini-stats — show during/after estimating */}
+      {(status.realPrices ?? 0) + (status.aiPrices ?? 0) > 0 && (
+        <div className="mx-4 mb-2 flex gap-2 text-xs">
+          <div className="flex-1 rounded px-2 py-1.5 text-center" style={{ background: 'rgba(34,197,94,0.08)', border: '1px solid rgba(34,197,94,0.15)' }}>
+            <span className="text-green-400 font-bold">{status.realPrices}</span>
+            <span className="text-slate-500 ml-1">real comps</span>
+          </div>
+          <div className="flex-1 rounded px-2 py-1.5 text-center" style={{ background: 'rgba(56,189,248,0.06)', border: '1px solid rgba(56,189,248,0.1)' }}>
+            <span className="text-sky-400 font-bold">{status.aiPrices}</span>
+            <span className="text-slate-500 ml-1">AI estimates</span>
+          </div>
+        </div>
+      )}
+
+      {/* Progress bar */}
+      <div className="mx-4 mb-3 mt-1 h-1 rounded-full bg-slate-800 overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${status.progress}%`, background: barColor }} />
+      </div>
+
+      {/* Stats — show once we have items */}
+      {status.itemsFound > 0 && (
+        <div className="flex border-t" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
+          <div className="flex-1 px-3 py-2.5 text-center border-r" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
+            <div className="text-xs text-slate-500">Found</div>
+            <div className="text-base font-black text-white">{status.itemsFound}</div>
+          </div>
+          <div className="flex-1 px-3 py-2.5 text-center border-r" style={{ borderColor: 'rgba(255,255,255,0.06)' }}>
+            <div className="text-xs text-slate-500">SG</div>
+            <div className="text-base font-black text-sky-400">{status.sgItems}</div>
+          </div>
+          <div className="flex-1 px-3 py-2.5 text-center">
+            <div className="text-xs text-slate-500">CT</div>
+            <div className="text-base font-black text-purple-400">{status.ctItems}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Error message */}
+      {status.phase === 'error' && status.error && (
+        <div className="mx-4 mb-3 text-xs text-red-400 bg-red-950/40 border border-red-900/40 rounded-lg px-3 py-2 truncate">
+          {status.error}
+        </div>
+      )}
     </div>
   )
 }
@@ -138,7 +186,7 @@ function ScoreBadge({ score }: { score: number }) {
 }
 
 // ── Deal card ─────────────────────────────────────────────────────────────────
-function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: string) => void; onBid: (id: string) => void }) {
+function DealCard({ deal, onDismiss, onBid, onStar, isNew }: { deal: Deal; onDismiss: (id: string) => void; onBid: (id: string) => void; onStar: (id: string, starred: boolean) => void; isNew?: boolean }) {
   const [expanded, setExpanded] = useState(false)
   const [dismissing, setDismissing] = useState(false)
   const roi = deal.current_bid > 0
@@ -165,6 +213,16 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
     })
     onBid(deal.id)
     window.open(deal.url, '_blank')
+  }
+
+  const handleStar = async () => {
+    const next = !deal.starred
+    await fetch(`/api/deals/${deal.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ starred: next }),
+    })
+    onStar(deal.id, next)
   }
 
   if (dismissing) return null
@@ -198,12 +256,26 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
             {deal.deal_score === 100 ? '🔥' : deal.deal_score}
           </div>
         </div>
-        {/* Source badge */}
-        <div className="absolute top-2 left-2">
+        {/* Source badge + NEW badge */}
+        <div className="absolute top-2 left-2 flex gap-1.5">
           <span className="text-xs px-2 py-0.5 rounded bg-black/70 text-sky-400 border border-sky-900">
             {deal.source}
           </span>
+          {isNew && (
+            <span className="text-xs px-2 py-0.5 rounded bg-amber-500 text-black font-black tracking-wide">
+              NEW
+            </span>
+          )}
         </div>
+        {/* Star button */}
+        <button
+          onClick={handleStar}
+          className="absolute top-2 right-10 w-7 h-7 rounded-full flex items-center justify-center transition-all"
+          style={{ background: deal.starred ? 'rgba(251,191,36,0.25)' : 'rgba(0,0,0,0.5)', border: deal.starred ? '1px solid rgba(251,191,36,0.5)' : '1px solid transparent' }}
+          title={deal.starred ? 'Unstar' : 'Star this deal'}
+        >
+          <span className="text-sm">{deal.starred ? '⭐' : '☆'}</span>
+        </button>
         {/* Bidded indicator */}
         {deal.bidded && (
           <div className="absolute bottom-2 left-2">
@@ -307,8 +379,13 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
           <button onClick={handleBid} className="btn btn-green flex-1 justify-center text-xs">
             🎯 Bid Now
           </button>
-          <button onClick={handleDismiss} className="btn btn-ghost text-xs px-3">
-            ✕
+          <button
+            onClick={handleDismiss}
+            className="btn btn-ghost text-xs px-3 group relative"
+            title="Hide this deal"
+          >
+            <span className="group-hover:hidden">✕</span>
+            <span className="hidden group-hover:inline text-slate-400">Hide</span>
           </button>
         </div>
       </div>
@@ -318,12 +395,14 @@ function DealCard({ deal, onDismiss, onBid }: { deal: Deal; onDismiss: (id: stri
 
 // ── Filter bar ────────────────────────────────────────────────────────────────
 const SOURCES = ['All', 'ShopGoodwill', 'CTBids']
-const CATEGORIES = ['All', 'Atari', 'Console Games', 'Big Box PC Game', 'Signed / Autograph', 'Trading Cards', 'Vintage Electronics', 'General']
+// Starred filter is handled via showStarredOnly state
+const CATEGORIES = ['All', 'Computer Games', 'Trading Cards', 'Signatures', 'Comics', 'Vintage Electronics', 'General', 'Other']
 const SCORES = [{ label: 'Any score', val: 0 }, { label: '50+', val: 50 }, { label: '60+', val: 60 }, { label: '70+ 🔥', val: 70 }, { label: '80+ 💎', val: 80 }]
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [deals, setDeals] = useState<Deal[]>([])
+  const [lastScanId, setLastScanId] = useState<string | null>(null)
   const [config, setConfig] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [scanning, setScanning] = useState(false)
@@ -332,6 +411,7 @@ export default function Dashboard() {
   const [category, setCategory] = useState('All')
   const [minScore, setMinScore] = useState(0)
   const [showDismissed, setShowDismissed] = useState(false)
+  const [showStarredOnly, setShowStarredOnly] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [kwInput, setKwInput] = useState('')
   const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
@@ -403,31 +483,54 @@ export default function Dashboard() {
     return () => clearInterval(interval)
   }, [scanning, loadDeals])
 
+  const getSecret = (): string | null => {
+    // Store CRON_SECRET in sessionStorage so we only ask once per browser session
+    let s = sessionStorage.getItem('gh_secret')
+    if (!s) {
+      s = prompt('Enter your CRON_SECRET (only asked once per session):')
+      if (!s) return null
+      sessionStorage.setItem('gh_secret', s)
+    }
+    return s
+  }
+
   const triggerScan = async () => {
-    const secret = prompt('Enter your CRON_SECRET (from .env):')
+    const secret = getSecret()
     if (!secret) return
     setScanning(true)
     setShowProgress(true)
     setScanStatusData({ phase: 'starting', message: 'Initializing scan…', detail: 'Connecting to sources', progress: 1, itemsFound: 0, sgItems: 0, ctItems: 0, currentKeyword: '', keywordsDone: 0, keywordsTotal: config?.keywords?.length ?? 0, imagesAnalyzed: 0, imagesTotal: 0, error: null })
-    // Fire and forget — polling handles completion
     fetch('/api/scan', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${secret}`,
-        'Content-Type': 'application/json',
-      },
-      body: overrideKeywords.length
-        ? JSON.stringify({ keywords: overrideKeywords })
-        : undefined,
+      headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
+      body: overrideKeywords.length ? JSON.stringify({ keywords: overrideKeywords }) : undefined,
     }).catch(e => {
       setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Scan failed', detail: String(e), error: String(e) } : null)
       setScanning(false)
     })
   }
 
+  const stopScan = async () => {
+    const secret = sessionStorage.getItem('gh_secret')
+    if (secret) {
+      await fetch('/api/scan/stop', { method: 'POST', headers: { 'Authorization': `Bearer ${secret}` } }).catch(() => {})
+    }
+    setScanning(false)
+    setScanStatusData(s => s ? { ...s, phase: 'done', message: 'Scan stopped', detail: 'Manually stopped', progress: 100 } : null)
+    await loadDeals()
+  }
+
   const activeBidded = deals.filter(d => d.bidded && !d.dismissed).length
+  const starredCount = deals.filter(d => d.starred && !d.dismissed).length
+
+  const handleStar = (id: string, starred: boolean) => {
+    setDeals(prev => prev.map(d => d.id === id ? { ...d, starred } : d))
+  }
 
   const sortedDeals = [...deals].sort((a, b) => {
+    // Starred always float to top
+    if (a.starred && !b.starred) return -1
+    if (!a.starred && b.starred) return 1
     if (sortBy === 'score')      return b.deal_score - a.deal_score
     if (sortBy === 'price_asc')  return a.current_bid - b.current_bid
     if (sortBy === 'price_desc') return b.current_bid - a.current_bid
@@ -439,6 +542,7 @@ export default function Dashboard() {
     return 0
   })
   const hotDeals = deals.filter(d => d.deal_score >= 70 && !d.dismissed).length
+  const displayDeals = showStarredOnly ? sortedDeals.filter(d => d.starred) : sortedDeals
   const avgScore = deals.length ? Math.round(deals.reduce((s, d) => s + d.deal_score, 0) / deals.length) : 0
 
   return (
@@ -455,6 +559,7 @@ export default function Dashboard() {
         <ScanProgress
           status={scanStatus}
           onClose={() => { setShowProgress(false); setScanStatusData(null) }}
+          onStop={stopScan}
         />
       )}
 
@@ -485,6 +590,12 @@ export default function Dashboard() {
                 <span className="text-green-300 font-bold">{hotDeals}</span>
               </div>
             )}
+            {starredCount > 0 && (
+              <div className="text-xs px-3 py-1.5 rounded-full bg-amber-950 border border-amber-800">
+                <span className="text-amber-400">⭐ </span>
+                <span className="text-amber-300 font-bold">{starredCount}</span>
+              </div>
+            )}
             {activeBidded > 0 && (
               <div className="text-xs px-3 py-1.5 rounded-full bg-sky-950 border border-sky-800">
                 <span className="text-sky-400">Bid on </span>
@@ -494,13 +605,14 @@ export default function Dashboard() {
           </div>
 
           <div className="flex items-center gap-2">
-            <button
-              onClick={triggerScan}
-              disabled={scanning}
-              className="btn btn-primary text-xs"
-            >
-              {scanning ? <><span className="spinner inline-block w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full" />Scanning…</> : '⚡ Run Scan'}
-            </button>
+            {scanning ? (
+              <button onClick={stopScan} className="btn text-xs font-bold" style={{ background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.4)', color: '#f87171' }}>
+                <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse mr-1.5" />
+                Stop Scan
+              </button>
+            ) : (
+              <button onClick={triggerScan} className="btn btn-primary text-xs">⚡ Run Scan</button>
+            )}
             <Link href="/config" className="btn btn-ghost text-xs">⚙ Config</Link>
           </div>
         </div>
@@ -638,7 +750,7 @@ export default function Dashboard() {
             <div className="w-10 h-10 border-3 border-sky-500 border-t-transparent rounded-full spinner" style={{ borderWidth: 3 }} />
             <div className="text-slate-500 text-sm">Loading deals…</div>
           </div>
-        ) : deals.length === 0 ? (
+        ) : displayDeals.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-32 gap-4 text-center">
             <div className="text-6xl">🎯</div>
             <div className="text-slate-300 font-semibold text-lg">No deals found</div>
@@ -649,12 +761,14 @@ export default function Dashboard() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {sortedDeals.map(deal => (
+            {displayDeals.map(deal => (
               <DealCard
                 key={deal.id}
                 deal={deal}
+                isNew={!!(lastScanId && deal.scan_id === lastScanId)}
                 onDismiss={id => setDeals(prev => prev.filter(d => d.id !== id))}
                 onBid={id => setDeals(prev => prev.map(d => d.id === id ? { ...d, bidded: true } : d))}
+                onStar={handleStar}
               />
             ))}
           </div>
