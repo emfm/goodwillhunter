@@ -16,6 +16,21 @@ function jitter(minMs: number, maxMs: number) {
   return new Promise(r => setTimeout(r, randInt(minMs, maxMs)))
 }
 
+// Anthropic API concurrency limiter — max 3 simultaneous calls to avoid 429s.
+// With 50+ items we'd fire 3+ concurrent batches otherwise.
+function makeAnthropicLimiter() {
+  const MAX = 3
+  let running = 0
+  const queue: Array<() => void> = []
+  return async function<T>(fn: () => Promise<T>): Promise<T> {
+    if (running >= MAX) await new Promise<void>(r => queue.push(r))
+    running++
+    try { return await fn() }
+    finally { running--; if (queue.length) queue.shift()!() }
+  }
+}
+const anthropicLimit = makeAnthropicLimiter()
+
 // Current browser fingerprints (Chrome 131/132 + Firefox 133 — dominant in early 2026)
 const BROWSERS = [
   {
@@ -528,6 +543,32 @@ async function estimateValueBatch(titles: string[]): Promise<Array<{ value: numb
       signal: AbortSignal.timeout(30000),
     })
 
+    if (res.status === 429) {
+      // Rate limited — wait 5s and retry once
+      console.warn('[VALUE] 429 rate limit — waiting 5s before retry')
+      await new Promise(r => setTimeout(r, 5000))
+      const retry = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 4096, system: VALUE_BATCH_SYSTEM, messages: [{ role: 'user', content: `Estimate resale values for these auction items:
+
+${prompt}` }] }),
+        signal: AbortSignal.timeout(30000),
+      })
+      if (!retry.ok) { console.error('[VALUE] Retry also failed:', retry.status); return titles.map(() => ({ value: 0, source: '' })) }
+      const retryData = await retry.json()
+      const retryRaw = retryData.content?.[0]?.text?.trim() ?? ''
+      if (retryRaw) {
+        try {
+          const clean = retryRaw.replace(/^```[a-z]*
+?|
+?```$/gm, '').trim()
+          const parsed = JSON.parse(clean) as Array<{ value: number; note: string }>
+          return parsed.map(p => ({ value: Math.round((Number(p.value) || 0) * 100) / 100, source: p.note ? `Claude: ${p.note}` : 'Claude estimate' }))
+        } catch { return titles.map(() => ({ value: 0, source: '' })) }
+      }
+      return titles.map(() => ({ value: 0, source: '' }))
+    }
     if (!res.ok) {
       const errText = await res.text().catch(() => '')
       console.error(`[VALUE] API error ${res.status}:`, errText.slice(0, 200))
@@ -810,16 +851,19 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       if (uncached.length > 0) batches.push({ items: batchItems, titles: uncached.map(c => c.title) })
       else batchItems.forEach(item => valMap.set(item.url, valueCache.get(item.title)!))
     }
-    await Promise.all(batches.map(async ({ items, titles }) => {
-      const results = await estimateValueBatch(titles)
-      let ri = 0
-      for (const item of items) {
-        if (!valueCache.has(item.title)) {
-          valueCache.set(item.title, results[ri++] ?? { value: 0, source: '' })
+    // Max 3 concurrent Anthropic calls — prevents 429 rate limit errors
+    await Promise.all(batches.map(({ items, titles }) =>
+      anthropicLimit(async () => {
+        const results = await estimateValueBatch(titles)
+        let ri = 0
+        for (const item of items) {
+          if (!valueCache.has(item.title)) {
+            valueCache.set(item.title, results[ri++] ?? { value: 0, source: '' })
+          }
+          valMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' })
         }
-        valMap.set(item.url, valueCache.get(item.title) ?? { value: 0, source: '' })
-      }
-    }))
+      })
+    ))
   }
 
   const valMs = Date.now() - scanStart - crawlMs
@@ -857,11 +901,10 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     console.log(`[SCAN] Analyzing ${toAnalyze.length} images (${(timeElapsed/1000).toFixed(1)}s elapsed, ${(timeLeft/1000).toFixed(1)}s budget remaining)`)
     setScanStatus({ phase: 'analyzing', message: 'Analyzing photos with Claude Vision', detail: `Top ${toAnalyze.length} candidates`, progress: 62, imagesTotal: toAnalyze.length, imagesAnalyzed: 0 })
 
-    // Fire ALL image analyses in parallel — Anthropic handles concurrent requests fine.
-    // 40 sequential = ~160s. 40 parallel = ~8s (network-bound, not CPU-bound).
-    setScanStatus({ imagesAnalyzed: 0, detail: `Analyzing ${toAnalyze.length} images in parallel...` })
+    // Max 3 concurrent image analyses — same Anthropic rate limit applies
+    setScanStatus({ imagesAnalyzed: 0, detail: `Analyzing ${toAnalyze.length} images...` })
     const imgResults = await Promise.all(
-      toAnalyze.map(item => analyzeImage(item.image_url, item.title).catch(() => null))
+      toAnalyze.map(item => anthropicLimit(() => analyzeImage(item.image_url, item.title).catch(() => null)))
     )
     toAnalyze.forEach((item, idx) => { imgMap.set(item.url, imgResults[idx] ?? null) })
     setScanStatus({ imagesAnalyzed: toAnalyze.length, detail: `${toAnalyze.length} images analyzed` })
