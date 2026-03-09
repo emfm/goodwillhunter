@@ -22,6 +22,10 @@ export interface ScanStatus {
   // image analysis counters
   imagesTotal?: number
   imagesAnalyzed?: number
+  // valuation stats
+  realPrices?: number
+  aiPrices?: number
+  scanId?: string
 }
 
 const DEFAULT: ScanStatus = {
