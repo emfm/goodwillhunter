@@ -41,7 +41,7 @@ export async function POST(req: NextRequest) {
     await setScanStatus({ phase: 'storing', message: 'Saving deals…', detail: `${deals.length} deals`, progress: 92 })
 
     const db = supabaseAdmin()
-    const rows = deals.map(d => {
+    const rows = (deals as Record<string, unknown>[]).map(d => {
       const row: Record<string, unknown> = { updated_at: new Date().toISOString() }
       for (const [k, v] of Object.entries(d)) {
         if (BASE_COLUMNS.has(k)) row[k] = v
