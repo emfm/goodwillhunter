@@ -1095,7 +1095,7 @@ export async function finalizeDeals(scanId: string, config: AppConfig): Promise<
     await setScanStatus({ imagesAnalyzed: toAnalyze.length, progress: 88 })
   }
 
-  const deals: unknown[] = []
+  const deals: Record<string, unknown>[] = []
   for (const item of rawItems as any[]) {
     const img = imgMap.get(item.url) ?? null
     const estVal = item.estimated_value ?? 0
