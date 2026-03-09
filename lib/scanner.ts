@@ -1051,18 +1051,24 @@ export async function estimateValuesForScan(
 
   await setScanStatus({ detail: `${realPrices} real comps, estimating ${needsHaiku.length} via AI…`, progress: 50 })
 
-  // Claude Haiku for misses — max 3 concurrent
+  // Claude Haiku for misses — sequential batches of 20, no parallelism to avoid 429s
   const VALUE_BATCH = 20
-  const batches: Array<RawItemRow[]> = []
-  for (let i = 0; i < needsHaiku.length; i += VALUE_BATCH) batches.push(needsHaiku.slice(i, i + VALUE_BATCH))
-
-  await Promise.all(batches.map(batch => anthropicLimit(async () => {
-    const results = await estimateValueBatch(batch.map(i => i.title))
-    batch.forEach((item, idx) => {
-      updates.push({ url: item.url, value: results[idx]?.value ?? 0, source: results[idx]?.source ?? '' })
-    })
-    await setScanStatus({ detail: `${updates.length}/${items.length} priced…` })
-  })))
+  for (let i = 0; i < needsHaiku.length; i += VALUE_BATCH) {
+    const batch = needsHaiku.slice(i, i + VALUE_BATCH)
+    try {
+      const results = await estimateValueBatch(batch.map(item => item.title))
+      batch.forEach((item, idx) => {
+        updates.push({ url: item.url, value: results[idx]?.value ?? 0, source: results[idx]?.source ?? '' })
+      })
+    } catch (e) {
+      // On any error (incl 429), give these items score 0 and move on
+      console.error(`[ESTIMATE] batch ${i}-${i+VALUE_BATCH} failed:`, e)
+      batch.forEach(item => updates.push({ url: item.url, value: 0, source: '' }))
+    }
+    await setScanStatus({ detail: `${updates.length}/${items.length} priced…`, progress: Math.round(40 + (updates.length / items.length) * 25) })
+    // Small pause between batches to stay under rate limit
+    if (i + VALUE_BATCH < needsHaiku.length) await new Promise(r => setTimeout(r, 500))
+  }
 
   const aiPrices = needsHaiku.length
   return { updates, realPrices, aiPrices }
