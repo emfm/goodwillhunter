@@ -1,56 +1,67 @@
 // lib/scan-status-store.ts
-// In-memory scan progress store — shared across the scanner and route.
-// Vercel runs each request in its own isolate, so this is only useful
-// within a single scan invocation. The /api/scan-status route reads it
-// for real-time progress polling from the UI.
+// Stores scan progress in Supabase so the polling GET and the scan POST
+// share state across Vercel Lambda isolates (in-memory doesn't work on Vercel).
+
+import { createClient } from '@supabase/supabase-js'
 
 export interface ScanStatus {
   phase: 'idle' | 'starting' | 'crawling_sg' | 'crawling_ct' | 'estimating' | 'analyzing' | 'storing' | 'done' | 'error'
   message: string
   detail: string
-  progress: number          // 0–100
+  progress: number
   startedAt: string | null
   finishedAt: string | null
   error: string | null
-  // crawl counters
   keywordsTotal?: number
   keywordsDone?: number
   currentKeyword?: string
   itemsFound?: number
   sgItems?: number
   ctItems?: number
-  // image analysis counters
   imagesTotal?: number
   imagesAnalyzed?: number
-  // valuation stats
   realPrices?: number
   aiPrices?: number
   scanId?: string
 }
 
 const DEFAULT: ScanStatus = {
-  phase: 'idle',
-  message: 'No scan running',
-  detail: '',
-  progress: 0,
-  startedAt: null,
-  finishedAt: null,
-  error: null,
+  phase: 'idle', message: 'No scan running', detail: '', progress: 0,
+  startedAt: null, finishedAt: null, error: null,
 }
 
-let _status: ScanStatus = { ...DEFAULT }
+// Fall back to in-memory if Supabase isn't configured (local dev)
+let _mem: ScanStatus = { ...DEFAULT }
 
-/** Merge a partial update into the current status */
-export function setScanStatus(update: Partial<ScanStatus>): void {
-  _status = { ..._status, ...update }
+function db() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) return null
+  return createClient(url, key)
 }
 
-/** Get current status snapshot */
-export function getScanStatus(): ScanStatus {
-  return { ..._status }
+export async function setScanStatus(update: Partial<ScanStatus>): Promise<void> {
+  _mem = { ..._mem, ...update }
+  const client = db()
+  if (!client) return
+  await client.from('scan_status').upsert({ id: 1, ..._mem }).then(({ error }) => {
+    if (error) console.warn('[STATUS] write error:', error.message)
+  })
 }
 
-/** Reset to idle (call at the start of each scan) */
+export async function getScanStatus(): Promise<ScanStatus> {
+  const client = db()
+  if (!client) return { ..._mem }
+  const { data, error } = await client.from('scan_status').select('*').eq('id', 1).single()
+  if (error || !data) return { ...DEFAULT }
+  const { id, ...rest } = data
+  return rest as ScanStatus
+}
+
 export function resetScanStatus(): void {
-  _status = { ...DEFAULT }
+  _mem = { ...DEFAULT }
+  const client = db()
+  if (client) {
+    client.from('scan_status').upsert({ id: 1, ..._mem }).catch(() => {})
+  }
 }
