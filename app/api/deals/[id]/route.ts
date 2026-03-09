@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
       .order('deal_score', { ascending: false })
       .limit(500)
 
-    if (!showDismissed) q = q.neq('dismissed', true)
+    if (!showDismissed) q = q.or('dismissed.is.null,dismissed.eq.false')
     if (source)         q = q.eq('source', source)
     if (category && category !== 'All') q = q.eq('category', category)
     if (minScore > 0)   q = q.gte('deal_score', minScore)
