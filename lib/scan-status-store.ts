@@ -62,6 +62,6 @@ export function resetScanStatus(): void {
   _mem = { ...DEFAULT }
   const client = db()
   if (client) {
-    client.from('scan_status').upsert({ id: 1, ..._mem }).catch(() => {})
+    client.from('scan_status').upsert({ id: 1, ..._mem }).then(() => {}).catch(() => {})
   }
 }
