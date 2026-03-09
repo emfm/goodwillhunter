@@ -981,3 +981,142 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   await setScanStatus({ phase: 'done', message: 'Scan complete', detail: `${deals.length} deals found (${withImg} with photo analysis)`, progress: 100, finishedAt: new Date().toISOString(), scanId })
   return deals
 }
+
+// ── Exported phase functions (used by split scan routes) ──────────────────────
+
+export interface RawItemRow {
+  url: string
+  title: string
+  current_bid: number
+}
+
+export async function crawlSources(config: AppConfig, scanId: string): Promise<{ items: RawItem[] }> {
+  resetStopFlag()
+  const seen = new Set<string>()
+  const rawItems: RawItem[] = []
+  const totalKeywords = config.keywords.length
+
+  await setScanStatus({ phase: 'crawling_sg', message: 'Searching sources…', detail: `0 / ${totalKeywords} keywords`, progress: 5, keywordsTotal: totalKeywords, keywordsDone: 0, itemsFound: 0, sgItems: 0, ctItems: 0, startedAt: new Date().toISOString() })
+
+  for (let kwIdx = 0; kwIdx < config.keywords.length; kwIdx++) {
+    const kw = config.keywords[kwIdx]
+    const pct = Math.round(5 + (kwIdx / totalKeywords) * 28)
+
+    if (config.sources.includes('shopgoodwill')) {
+      await setScanStatus({ phase: 'crawling_sg', currentKeyword: kw, keywordsDone: kwIdx, progress: pct, message: `SG: "${kw}"`, detail: `${kwIdx + 1}/${totalKeywords}` })
+      try {
+        const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword ?? 2)
+        items.filter(i => !seen.has(i.url)).forEach(i => { seen.add(i.url); rawItems.push(i) })
+        await setScanStatus({ sgItems: rawItems.filter(i => i.source === 'ShopGoodwill').length, itemsFound: rawItems.length })
+      } catch (e) { console.error(`[SG] "${kw}" error:`, e) }
+    }
+
+    if (config.sources.includes('ctbids')) {
+      await setScanStatus({ phase: 'crawling_ct', currentKeyword: kw, message: `CT: "${kw}"`, detail: `${kwIdx + 1}/${totalKeywords}` })
+      try {
+        const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword ?? 2)
+        items.filter(i => !seen.has(i.url)).forEach(i => { seen.add(i.url); rawItems.push(i) })
+        await setScanStatus({ ctItems: rawItems.filter(i => i.source === 'CTBids').length, itemsFound: rawItems.length })
+      } catch (e) { console.error(`[CT] "${kw}" error:`, e) }
+    }
+
+    await setScanStatus({ keywordsDone: kwIdx + 1 })
+    if (isStopRequested()) break
+    if (kwIdx < config.keywords.length - 1) await jitter(400, 900)
+  }
+
+  console.log(`[CRAWL] ${rawItems.length} items (SG: ${rawItems.filter(i=>i.source==='ShopGoodwill').length}, CT: ${rawItems.filter(i=>i.source==='CTBids').length})`)
+  return { items: rawItems }
+}
+
+export async function estimateValuesForScan(
+  items: RawItemRow[],
+  _scanId: string
+): Promise<{ updates: Array<{ url: string; value: number; source: string }>; realPrices: number; aiPrices: number }> {
+  const updates: Array<{ url: string; value: number; source: string }> = []
+  let realPrices = 0
+
+  // PriceCharting first (free, fast)
+  const pcResults = await Promise.all(items.map(i => lookupPricecharting(i.title).catch(() => null)))
+  const needsHaiku: RawItemRow[] = []
+  items.forEach((item, idx) => {
+    const pc = pcResults[idx]
+    if (pc && pc.value > 0) {
+      updates.push({ url: item.url, value: pc.value, source: pc.source })
+      realPrices++
+    } else {
+      needsHaiku.push(item)
+    }
+  })
+
+  await setScanStatus({ detail: `${realPrices} real comps, estimating ${needsHaiku.length} via AI…`, progress: 50 })
+
+  // Claude Haiku for misses — max 3 concurrent
+  const VALUE_BATCH = 20
+  const batches: Array<RawItemRow[]> = []
+  for (let i = 0; i < needsHaiku.length; i += VALUE_BATCH) batches.push(needsHaiku.slice(i, i + VALUE_BATCH))
+
+  await Promise.all(batches.map(batch => anthropicLimit(async () => {
+    const results = await estimateValueBatch(batch.map(i => i.title))
+    batch.forEach((item, idx) => {
+      updates.push({ url: item.url, value: results[idx]?.value ?? 0, source: results[idx]?.source ?? '' })
+    })
+    await setScanStatus({ detail: `${updates.length}/${items.length} priced…` })
+  })))
+
+  const aiPrices = needsHaiku.length
+  return { updates, realPrices, aiPrices }
+}
+
+export async function finalizeDeals(scanId: string, config: AppConfig): Promise<unknown[]> {
+  const { createClient } = await import('@supabase/supabase-js')
+  const db = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
+
+  const { data: rawItems } = await db.from('raw_scan_items').select('*').eq('scan_id', scanId)
+  if (!rawItems?.length) return []
+
+  const scanStartedAt = new Date().toISOString()
+
+  // Pre-score to pick image candidates
+  const prescored = rawItems.map((item: any) => {
+    const val = item.estimated_value ?? 0
+    const bid = item.current_bid ?? 0
+    const prescore = val > 0 && bid > 0 ? Math.max(0, ((val - bid) / val) * 100) : 0
+    return { item, prescore }
+  }).sort((a: any, b: any) => b.prescore - a.prescore)
+
+  const toAnalyze = prescored.slice(0, 15).map((p: any) => p.item)
+  const imgMap = new Map<string, ImageAnalysis | null>()
+
+  if (config.analyze_images && process.env.ANTHROPIC_API_KEY && toAnalyze.length > 0) {
+    await setScanStatus({ phase: 'analyzing', message: 'Analyzing photos…', detail: `Top ${toAnalyze.length} items`, progress: 70, imagesTotal: toAnalyze.length, imagesAnalyzed: 0 })
+    const results = await Promise.all(toAnalyze.map((item: any) => anthropicLimit(() => analyzeImage(item.image_url, item.title).catch(() => null))))
+    toAnalyze.forEach((item: any, idx: number) => imgMap.set(item.url, results[idx] ?? null))
+    await setScanStatus({ imagesAnalyzed: toAnalyze.length, progress: 88 })
+  }
+
+  const deals: unknown[] = []
+  for (const item of rawItems as any[]) {
+    const img = imgMap.get(item.url) ?? null
+    const estVal = item.estimated_value ?? 0
+    const adjValue = Math.round(estVal * (img?.value_multiplier ?? 1) * 100) / 100
+    const score = scoreDeal(item, estVal, img, config)
+
+    deals.push({
+      title: item.title, current_bid: item.current_bid,
+      estimated_value: estVal, adjusted_value: adjValue, deal_score: score,
+      url: item.url, image_url: item.image_url, source: item.source,
+      end_time: item.end_time, time_remaining: item.time_remaining, num_bids: item.num_bids,
+      category: categorize(item.title), matched_keyword: item.matched_keyword,
+      match_type: item.match_type ?? 'text', description: null,
+      value_source: item.value_source ?? '',
+      condition: img?.condition ?? null, condition_score: img?.condition_score ?? null,
+      completeness: img?.completeness ?? null, is_authentic: img?.is_authentic ?? null,
+      value_multiplier: img?.value_multiplier ?? 1,
+      flags: img?.flags ?? [], positives: img?.positives ?? [], img_summary: img?.summary ?? null,
+      starred: false, first_seen_at: scanStartedAt, scan_id: scanId,
+    })
+  }
+
+  return deals
+}
