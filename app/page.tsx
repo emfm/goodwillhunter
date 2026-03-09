@@ -522,14 +522,36 @@ export default function Dashboard() {
     setScanning(true)
     setShowProgress(true)
     setScanStatusData({ phase: 'starting', message: 'Initializing scan…', detail: 'Connecting to sources', progress: 1, itemsFound: 0, sgItems: 0, ctItems: 0, currentKeyword: '', keywordsDone: 0, keywordsTotal: config?.keywords?.length ?? 0, imagesAnalyzed: 0, imagesTotal: 0, error: null })
-    fetch('/api/scan', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' },
-      body: overrideKeywords.length ? JSON.stringify({ keywords: overrideKeywords }) : undefined,
-    }).catch(e => {
-      setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Scan failed', detail: String(e), error: String(e) } : null)
+
+    const headers: Record<string, string> = { 'Authorization': `Bearer ${secret}`, 'Content-Type': 'application/json' }
+    const kwBody = overrideKeywords.length ? JSON.stringify({ keywords: overrideKeywords }) : undefined
+
+    // Phase 1: Crawl — await it so we get scanId back before firing estimate
+    let scanId: string | null = null
+    try {
+      const r1 = await fetch('/api/scan/crawl', { method: 'POST', headers, body: kwBody })
+      if (!r1.ok) { const t = await r1.text(); throw new Error(`Crawl failed (${r1.status}): ${t}`) }
+      const d1 = await r1.json()
+      scanId = d1.scanId
+    } catch (e) {
+      setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Crawl failed', detail: String(e), error: String(e) } : null)
       setScanning(false)
-    })
+      return
+    }
+
+    // Phase 2 + 3: fire estimate, then chain finalize — polling shows live progress
+    fetch('/api/scan/estimate', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
+      .then(async r2 => {
+        if (!r2.ok) throw new Error(`Estimate failed: ${r2.status}`)
+        return fetch('/api/scan/finalize', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
+      })
+      .then(async r3 => {
+        if (r3 && !r3.ok) throw new Error(`Finalize failed: ${r3.status}`)
+      })
+      .catch(e => {
+        setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Scan failed', detail: String(e), error: String(e) } : null)
+        setScanning(false)
+      })
   }
 
   const stopScan = async () => {
