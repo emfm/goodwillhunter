@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { setScanStatus, resetScanStatus } from '@/lib/scan-status-store'
 import { supabaseAdmin, getConfig, setLastScanTime } from '@/lib/supabase'
 import { runScan } from '@/lib/scanner'
 import { sendAlertEmail } from '@/lib/email'
@@ -17,7 +18,7 @@ const BASE_COLUMNS = new Set([
   'img_summary','updated_at',
 ])
 // Columns added by migration.sql — safe to include once migration has run
-const MIGRATION_COLUMNS = new Set(['match_type','description'])
+const MIGRATION_COLUMNS = new Set(['match_type','description','starred','first_seen_at','scan_id'])
 
 export async function POST(req: NextRequest) {
   const auth = req.headers.get('authorization')
@@ -27,6 +28,8 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    reawait setScanStatus()
+    await setScanStatus({ phase: 'starting', message: 'Scan initializing…', detail: 'Loading config', progress: 1, startedAt: new Date().toISOString() })
     console.log('\n[ROUTE] ══════════════════════════════════════════')
     console.log('[ROUTE] Goodwill Hunter scan starting')
     console.log('[ROUTE] ══════════════════════════════════════════')
@@ -131,6 +134,7 @@ export async function POST(req: NextRequest) {
 
     await setLastScanTime()
 
+    await setScanStatus({ phase: 'done', message: '✅ Scan complete', detail: `${deals.length} items stored · ${toEmail.length} alerts sent`, progress: 100, finishedAt: new Date().toISOString() })
     console.log(`[ROUTE] ══ DONE: ${deals.length} scanned, ${dbCount} in DB, ${toEmail.length} emailed ══`)
 
     return NextResponse.json({
@@ -143,6 +147,7 @@ export async function POST(req: NextRequest) {
     })
 
   } catch (err) {
+    await setScanStatus({ phase: 'error', message: '❌ Scan failed', detail: String(err), error: String(err), progress: 0, finishedAt: new Date().toISOString() })
     console.error('[ROUTE] ❌ FATAL:', String(err))
     return NextResponse.json({ error: String(err) }, { status: 500 })
   }
