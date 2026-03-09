@@ -87,9 +87,10 @@ function fromRow(row: Record<string, unknown>): ScanStatus {
 export async function setScanStatus(update: Partial<ScanStatus>): Promise<void> {
   _mem = { ..._mem, ...update }
   const client = db()
-  if (!client) return
-  const { error } = await client.from('scan_status').upsert(toRow(_mem))
-  if (error) console.warn('[STATUS] write error:', error.message)
+  if (!client) { console.warn('[STATUS] no db client — missing env vars'); return }
+  const row = toRow(_mem)
+  const { error } = await client.from('scan_status').upsert(row)
+  if (error) console.error('[STATUS] upsert error:', error.message, JSON.stringify(row).slice(0, 200))
 }
 
 export async function getScanStatus(): Promise<ScanStatus> {
