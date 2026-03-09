@@ -61,11 +61,11 @@ export async function POST(req: NextRequest) {
     const alertScore = config.alert_score_threshold ?? 70
     const hotDeals = deals.filter(d => (d as any).deal_score >= alertScore)
     if (hotDeals.length && config.alert_email) {
-      await sendAlertEmail(config.alert_email, hotDeals as any).catch(() => {})
+      await (sendAlertEmail as any)(hotDeals, config.alert_email).catch(() => {})
     }
     if (hotDeals.length && config.sms_enabled && config.alert_phone) {
       for (const d of hotDeals.slice(0, 3)) {
-        await sendSmsAlert(config.alert_phone, d as any).catch(() => {})
+        await (sendSmsAlert as any)(d, config.alert_phone).catch(() => {})
       }
     }
 
