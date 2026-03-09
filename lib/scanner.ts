@@ -1068,7 +1068,7 @@ export async function estimateValuesForScan(
   return { updates, realPrices, aiPrices }
 }
 
-export async function finalizeDeals(scanId: string, config: AppConfig): Promise<unknown[]> {
+export async function finalizeDeals(scanId: string, config: AppConfig): Promise<Record<string, unknown>[]> {
   const { createClient } = await import('@supabase/supabase-js')
   const db = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!)
 
