@@ -35,23 +35,7 @@ export async function POST(req: NextRequest) {
     const db = supabaseAdmin()
 
     // Create table if missing (idempotent)
-    await db.rpc('exec_sql', { sql: `
-      CREATE TABLE IF NOT EXISTS raw_scan_items (
-        id bigserial PRIMARY KEY,
-        scan_id text NOT NULL,
-        url text NOT NULL,
-        title text, current_bid numeric, image_url text, source text,
-        end_time text, time_remaining text, num_bids integer DEFAULT 0,
-        matched_keyword text, match_type text DEFAULT 'text',
-        estimated_value numeric, value_source text,
-        condition text, condition_score integer, completeness text,
-        is_authentic boolean, value_multiplier numeric DEFAULT 1,
-        flags jsonb DEFAULT '[]', positives jsonb DEFAULT '[]', img_summary text,
-        created_at timestamptz DEFAULT now(),
-        UNIQUE(url)
-      );
-      ALTER TABLE raw_scan_items DISABLE ROW LEVEL SECURITY;
-    ` }).catch(() => {}) // rpc may not exist — fallback below
+    try { await db.rpc('exec_sql', { sql: `ALTER TABLE raw_scan_items DISABLE ROW LEVEL SECURITY;` }) } catch { /* ok */ }
 
     const CHUNK = 500
     let stored = 0
