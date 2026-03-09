@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
 
     // Clean up any leftover raw items from previous failed scans
     const db0 = supabaseAdmin()
-    await db0.from('raw_scan_items').delete().lt('created_at', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()).catch(() => {})
+    try { await db0.from('raw_scan_items').delete().lt('created_at', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()) } catch {}
 
     const { items } = await crawlSources(config, scanId)
 
