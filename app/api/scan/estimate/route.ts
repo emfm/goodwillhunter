@@ -39,19 +39,16 @@ export async function POST(req: NextRequest) {
 
     const { updates, realPrices, aiPrices } = await estimateValuesForScan(items, scanId)
 
-    // Bulk upsert with values back to raw_scan_items (much faster than per-row updates)
-    const CHUNK = 500
+    // Update estimated_value per row — use individual updates to avoid upsert conflicts
+    const CHUNK = 100
     for (let i = 0; i < updates.length; i += CHUNK) {
       const chunk = updates.slice(i, i + CHUNK)
-      // Use upsert on url — updates estimated_value and value_source
-      const rows = chunk.map(u => ({
-        scan_id: scanId,
-        url: u.url,
-        estimated_value: u.value,
-        value_source: u.source,
-      }))
-      const { error: upErr } = await db.from('raw_scan_items').upsert(rows, { onConflict: 'url' })
-      if (upErr) console.error(`[ESTIMATE] upsert chunk error:`, upErr.message)
+      await Promise.all(chunk.map(u =>
+        db.from('raw_scan_items')
+          .update({ estimated_value: u.value, value_source: u.source })
+          .eq('scan_id', scanId)
+          .eq('url', u.url)
+      ))
     }
 
     await setScanStatus({ phase: 'analyzing', message: 'Prices done', detail: `${realPrices} real comps · ${aiPrices} AI estimates`, progress: 65, realPrices, aiPrices })
