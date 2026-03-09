@@ -579,7 +579,7 @@ ${prompt}` }] }),
     if (!raw) { console.error('[VALUE] Empty response from Claude'); return titles.map(() => ({ value: 0, source: '' })) }
 
     // Strip markdown fences if present
-    const clean = raw.replace(/^```[a-z]*\n?|\n?```$/gm, '').trim()
+    const clean = raw.replace(/^```[a-z]*/gm, '').replace(/```$/gm, '').trim()
 
     // If JSON got truncated, patch it so we get partial results rather than zero
     let toParse = clean
@@ -668,7 +668,7 @@ async function analyzeImage(imageUrl: string, title: string): Promise<ImageAnaly
     if (!res.ok) return null
     const data = await res.json()
     const raw = data.content?.[0]?.text?.trim() ?? ''
-    const clean = raw.replace(/^```[a-z]*\n?|\n?```$/gm, '').trim()
+    const clean = raw.replace(/^```[a-z]*/gm, '').replace(/```$/gm, '').trim()
     const parsed = JSON.parse(clean) as ImageAnalysis
     imageCache.set(imageUrl, parsed)
     return parsed
