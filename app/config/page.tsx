@@ -418,7 +418,7 @@ export default function Dashboard() {
   const [kwInput, setKwInput] = useState('')
   const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
   const [kwOpen, setKwOpen] = useState(false)
-  const [sortBy, setSortBy] = useState<'score' | 'price_asc' | 'price_desc' | 'ending'>('score')
+  const [sortBy, setSortBy] = useState<'score' | 'roi' | 'price_asc' | 'price_desc' | 'ending'>('score')
   const [scanStatus, setScanStatusData] = useState<ScanStatusData | null>(null)
   const [showProgress, setShowProgress] = useState(false)
 
@@ -586,6 +586,11 @@ export default function Dashboard() {
     if (a.starred && !b.starred) return -1
     if (!a.starred && b.starred) return 1
     if (sortBy === 'score')      return b.deal_score - a.deal_score
+    if (sortBy === 'roi') {
+      const roiA = a.estimated_value > 0 ? (a.estimated_value - a.current_bid) / a.estimated_value : -1
+      const roiB = b.estimated_value > 0 ? (b.estimated_value - b.current_bid) / b.estimated_value : -1
+      return roiB - roiA
+    }
     if (sortBy === 'price_asc')  return a.current_bid - b.current_bid
     if (sortBy === 'price_desc') return b.current_bid - a.current_bid
     if (sortBy === 'ending') {
@@ -785,10 +790,11 @@ export default function Dashboard() {
             <span className="text-xs text-slate-600 mr-1">Sort:</span>
             {([
               { val: 'score',      label: '🏆 Score' },
+              { val: 'roi',        label: '📈 ROI' },
               { val: 'price_asc',  label: '💰 Cheapest' },
               { val: 'price_desc', label: '💰 Priciest' },
               { val: 'ending',     label: '⏱ Ending' },
-            ] as const).map(s => (
+            ] as const).map((s: { val: 'score' | 'roi' | 'price_asc' | 'price_desc' | 'ending', label: string }) => (
               <button key={s.val} onClick={() => setSortBy(s.val)}
                 className={`text-xs px-2.5 py-1.5 rounded-md font-semibold transition-all ${
                   sortBy === s.val ? 'bg-sky-900 text-sky-300 border border-sky-700' : 'text-slate-500 hover:text-slate-300'
