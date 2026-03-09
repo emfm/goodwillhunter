@@ -1,6 +1,4 @@
 // app/api/scan/crawl/route.ts
-// Phase 1: Crawl SG + CTBids, store raw items to DB, return scan_id
-// Typically 30–90s depending on keyword count
 import { NextRequest, NextResponse } from 'next/server'
 import { setScanStatus, resetScanStatus } from '@/lib/scan-status-store'
 import { supabaseAdmin, getConfig } from '@/lib/supabase'
@@ -28,30 +26,72 @@ export async function POST(req: NextRequest) {
     const scanId = `scan_${Date.now()}`
     const { items } = await crawlSources(config, scanId)
 
-    // Store raw items to DB
-    const db = supabaseAdmin()
-    if (items.length > 0) {
-      const rows = items.map(i => ({
-        scan_id: scanId,
-        url: i.url,
-        title: i.title,
-        current_bid: i.current_bid,
-        image_url: i.image_url,
-        source: i.source,
-        end_time: i.end_time,
-        time_remaining: i.time_remaining,
-        num_bids: i.num_bids,
-        matched_keyword: i.matched_keyword,
-        match_type: i.match_type ?? 'text',
-      }))
-      const { error } = await db.from('raw_scan_items').upsert(rows, { onConflict: 'url' })
-      if (error) console.error('[CRAWL] upsert error:', error.message)
+    if (!items.length) {
+      await setScanStatus({ phase: 'done', message: 'No items found', detail: 'Try different keywords', progress: 100, finishedAt: new Date().toISOString() })
+      return NextResponse.json({ ok: true, scanId, count: 0 })
     }
 
-    await setScanStatus({ phase: 'estimating', message: 'Crawl complete', detail: `${items.length} items found`, progress: 35, itemsFound: items.length, sgItems: items.filter(i => i.source === 'ShopGoodwill').length, ctItems: items.filter(i => i.source === 'CTBids').length })
-    console.log(`[CRAWL] Done: ${items.length} items, scan_id=${scanId}`)
-    return NextResponse.json({ ok: true, scanId, count: items.length })
+    // Ensure table exists, then store
+    const db = supabaseAdmin()
+
+    // Create table if missing (idempotent)
+    await db.rpc('exec_sql', { sql: `
+      CREATE TABLE IF NOT EXISTS raw_scan_items (
+        id bigserial PRIMARY KEY,
+        scan_id text NOT NULL,
+        url text NOT NULL,
+        title text, current_bid numeric, image_url text, source text,
+        end_time text, time_remaining text, num_bids integer DEFAULT 0,
+        matched_keyword text, match_type text DEFAULT 'text',
+        estimated_value numeric, value_source text,
+        condition text, condition_score integer, completeness text,
+        is_authentic boolean, value_multiplier numeric DEFAULT 1,
+        flags jsonb DEFAULT '[]', positives jsonb DEFAULT '[]', img_summary text,
+        created_at timestamptz DEFAULT now(),
+        UNIQUE(url)
+      );
+      ALTER TABLE raw_scan_items DISABLE ROW LEVEL SECURITY;
+    ` }).catch(() => {}) // rpc may not exist — fallback below
+
+    const CHUNK = 500
+    let stored = 0
+    for (let i = 0; i < items.length; i += CHUNK) {
+      const chunk = items.slice(i, i + CHUNK).map(item => ({
+        scan_id: scanId,
+        url: item.url,
+        title: item.title,
+        current_bid: item.current_bid,
+        image_url: item.image_url,
+        source: item.source,
+        end_time: item.end_time,
+        time_remaining: item.time_remaining,
+        num_bids: item.num_bids,
+        matched_keyword: item.matched_keyword,
+        match_type: item.match_type ?? 'text',
+      }))
+      const { error, count } = await db.from('raw_scan_items').upsert(chunk, { onConflict: 'url' })
+      if (error) {
+        console.error(`[CRAWL] upsert chunk ${i}-${i+CHUNK} error:`, error.message, error.code)
+        // If table doesn't exist, return error so user knows to run migration
+        if (error.code === '42P01') {
+          return NextResponse.json({ error: 'Table raw_scan_items not found. Please run migration.sql in Supabase.' }, { status: 500 })
+        }
+      } else {
+        stored += chunk.length
+      }
+    }
+
+    await setScanStatus({
+      phase: 'estimating', message: 'Crawl complete', progress: 35,
+      detail: `${stored} items stored — SG: ${items.filter(i => i.source==='ShopGoodwill').length}, CT: ${items.filter(i=>i.source==='CTBids').length}`,
+      itemsFound: items.length,
+      sgItems: items.filter(i => i.source === 'ShopGoodwill').length,
+      ctItems: items.filter(i => i.source === 'CTBids').length,
+    })
+    console.log(`[CRAWL] Done: ${stored}/${items.length} stored, scan_id=${scanId}`)
+    return NextResponse.json({ ok: true, scanId, count: stored })
   } catch (err) {
+    console.error('[CRAWL] fatal:', err)
     await setScanStatus({ phase: 'error', message: 'Crawl failed', detail: String(err), error: String(err), progress: 0 })
     return NextResponse.json({ error: String(err) }, { status: 500 })
   }
