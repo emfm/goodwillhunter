@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    reawait setScanStatus()
+    resetScanStatus()
     await setScanStatus({ phase: 'starting', message: 'Scan initializing…', detail: 'Loading config', progress: 1, startedAt: new Date().toISOString() })
     console.log('\n[ROUTE] ══════════════════════════════════════════')
     console.log('[ROUTE] Goodwill Hunter scan starting')
