@@ -1,7 +1,4 @@
 // lib/scan-status-store.ts
-// Stores scan progress in Supabase so the polling GET and the scan POST
-// share state across Vercel Lambda isolates (in-memory doesn't work on Vercel).
-
 import { createClient } from '@supabase/supabase-js'
 
 export interface ScanStatus {
@@ -30,7 +27,6 @@ const DEFAULT: ScanStatus = {
   startedAt: null, finishedAt: null, error: null,
 }
 
-// Fall back to in-memory if Supabase isn't configured (local dev)
 let _mem: ScanStatus = { ...DEFAULT }
 
 function db() {
@@ -40,13 +36,60 @@ function db() {
   return createClient(url, key)
 }
 
+// Flatten ScanStatus to snake_case columns for Supabase
+function toRow(s: ScanStatus) {
+  return {
+    id: 1,
+    phase: s.phase,
+    message: s.message,
+    detail: s.detail,
+    progress: s.progress,
+    started_at: s.startedAt,
+    finished_at: s.finishedAt,
+    error: s.error,
+    keywords_total: s.keywordsTotal ?? null,
+    keywords_done: s.keywordsDone ?? null,
+    current_keyword: s.currentKeyword ?? null,
+    items_found: s.itemsFound ?? null,
+    sg_items: s.sgItems ?? null,
+    ct_items: s.ctItems ?? null,
+    images_total: s.imagesTotal ?? null,
+    images_analyzed: s.imagesAnalyzed ?? null,
+    real_prices: s.realPrices ?? null,
+    ai_prices: s.aiPrices ?? null,
+    scan_id: s.scanId ?? null,
+  }
+}
+
+function fromRow(row: Record<string, unknown>): ScanStatus {
+  return {
+    phase: (row.phase as ScanStatus['phase']) ?? 'idle',
+    message: (row.message as string) ?? '',
+    detail: (row.detail as string) ?? '',
+    progress: (row.progress as number) ?? 0,
+    startedAt: (row.started_at as string) ?? null,
+    finishedAt: (row.finished_at as string) ?? null,
+    error: (row.error as string) ?? null,
+    keywordsTotal: (row.keywords_total as number) ?? undefined,
+    keywordsDone: (row.keywords_done as number) ?? undefined,
+    currentKeyword: (row.current_keyword as string) ?? undefined,
+    itemsFound: (row.items_found as number) ?? undefined,
+    sgItems: (row.sg_items as number) ?? undefined,
+    ctItems: (row.ct_items as number) ?? undefined,
+    imagesTotal: (row.images_total as number) ?? undefined,
+    imagesAnalyzed: (row.images_analyzed as number) ?? undefined,
+    realPrices: (row.real_prices as number) ?? undefined,
+    aiPrices: (row.ai_prices as number) ?? undefined,
+    scanId: (row.scan_id as string) ?? undefined,
+  }
+}
+
 export async function setScanStatus(update: Partial<ScanStatus>): Promise<void> {
   _mem = { ..._mem, ...update }
   const client = db()
   if (!client) return
-  await client.from('scan_status').upsert({ id: 1, ..._mem }).then(({ error }) => {
-    if (error) console.warn('[STATUS] write error:', error.message)
-  })
+  const { error } = await client.from('scan_status').upsert(toRow(_mem))
+  if (error) console.warn('[STATUS] write error:', error.message)
 }
 
 export async function getScanStatus(): Promise<ScanStatus> {
@@ -54,14 +97,13 @@ export async function getScanStatus(): Promise<ScanStatus> {
   if (!client) return { ..._mem }
   const { data, error } = await client.from('scan_status').select('*').eq('id', 1).single()
   if (error || !data) return { ...DEFAULT }
-  const { id, ...rest } = data
-  return rest as ScanStatus
+  return fromRow(data as Record<string, unknown>)
 }
 
 export function resetScanStatus(): void {
   _mem = { ...DEFAULT }
   const client = db()
   if (client) {
-    void client.from('scan_status').upsert({ id: 1, ..._mem })
+    void client.from('scan_status').upsert(toRow(_mem))
   }
 }
