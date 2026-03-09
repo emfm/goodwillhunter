@@ -1,6 +1,6 @@
 import { AppConfig, Deal } from './types'
 import { setScanStatus } from './scan-status-store'
-import { isStopRequested, resetStopFlag } from '../app/api/scan/stop/route'
+import { isStopRequested, resetStopFlag } from './scan-stop-store'
 import { createCipheriv } from 'crypto'
 
 // ── Stealth helpers ───────────────────────────────────────────────────────────
@@ -639,12 +639,18 @@ async function analyzeImage(imageUrl: string, title: string): Promise<ImageAnaly
 
 // ── Scorer ────────────────────────────────────────────────────────────────────
 const CATEGORIES: Record<string, RegExp[]> = {
-  'Big Box PC Game': [/\bbig box\b/i, /\bpc game\b/i, /\bms-?dos\b/i, /\bcomplete in box\b/i],
-  'Atari': [/\batari\b/i],
-  'Console Games': [/\bnintendo\b/i, /\bnes\b/i, /\bsnes\b/i, /\bn64\b/i, /\bgame ?boy\b/i, /\bsega\b/i, /\bgenesis\b/i, /\bplaystation\b/i, /\bgamecube\b/i],
-  'Signed / Autograph': [/\bsigned\b/i, /\bautograph/i],
-  'Vintage Electronics': [/\bcommodore\b/i, /\bvintage\b.*\bcomputer\b/i],
-  'Trading Cards': [/\bpsa\b/i, /\bbgs\b/i, /\bpokemon\b.*\bcard\b/i, /\bmagic.*gathering\b/i],
+  'Signatures':      [/\bsigned\b/i, /\bautograph/i, /\bcoa\b/i, /\bjsa\b/i, /\bbeckett\b/i, /\bpsa\s*dna\b/i],
+  'Comics':          [/\bcomic\b/i, /\bmarvel\b/i, /\bdc comics\b/i, /\bgraphic novel\b/i, /\bcomic book\b/i, /\bcomic lot\b/i],
+  'Computer Games':  [/\bbig box\b/i, /\bpc game\b/i, /\bms-?dos\b/i, /\bwindows game\b/i, /\bcomputer game\b/i, /\batari\b/i, /\bcommodore\b/i, /\bapple ii\b/i, /\btrs-?80\b/i,
+                      /\bnintendo\b/i, /\bnes\b/i, /\bsnes\b/i, /\bn64\b/i, /\bgame ?boy\b/i, /\bgame ?cube\b/i, /\bwii\b/i,
+                      /\bsega\b/i, /\bgenesis\b/i, /\bmega drive\b/i, /\bmaster system\b/i, /\bdream ?cast\b/i,
+                      /\bplaystation\b/i, /\bps[1-5]\b/i, /\bxbox\b/i, /\bvideo game\b/i, /\bgame cartridge\b/i,
+                      /\bintellivision\b/i, /\bcolecovision\b/i, /\bvectrex\b/i, /\bvirtual boy\b/i, /\b3do\b/i],
+  'Trading Cards':   [/\bpokemon\b/i, /\bmagic.*gathering\b/i, /\bmtg\b/i, /\bsports card\b/i, /\bbaseball card\b/i,
+                      /\bfootball card\b/i, /\bbasketball card\b/i, /\btrading card\b/i, /\bpsa\b/i, /\bbgs\b/i,
+                      /\byugioh\b/i, /\byu-gi-oh\b/i, /\bdragon ball\b/i, /\bone piece card\b/i],
+  'Vintage Electronics': [/\bvintage\b.*\belectron/i, /\bvintage\b.*\bcomputer\b/i, /\bvintage\b.*\bcalculator\b/i,
+                           /\bamiga\b/i, /\btrs-?80\b/i, /\bapple ii\b/i, /\bvintage\b.*\bcamera\b/i],
 }
 
 function categorize(title: string): string {
@@ -710,6 +716,8 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   const seen = new Set<string>()
   const rawItems: RawItem[] = []
   const scanStart = Date.now()
+  const scanId = `scan_${scanStart}`
+  const scanStartedAt = new Date().toISOString()
 
   // ── Phase 1: Crawl — sequential, polite ───────────────────────────────────
   const totalKeywords = config.keywords.length
@@ -817,7 +825,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   const valMs = Date.now() - scanStart - crawlMs
   const realPrices = [...valMap.values()].filter(v => v.source.startsWith('PriceCharting')).length
   console.log(`[SCAN] Valuation done in ${(valMs/1000).toFixed(1)}s — ${realPrices} real comps, ${valMap.size - realPrices} AI estimates`)
-  setScanStatus({ progress: 60, detail: `${realPrices} real market prices + ${valMap.size - realPrices} AI estimates` })
+  setScanStatus({ progress: 60, detail: `${realPrices} real market prices + ${valMap.size - realPrices} AI estimates`, realPrices, aiPrices: valMap.size - realPrices })
 
   // ── Phase 3: Pre-score without images → pick TOP candidates for vision ──────
   // This ensures we only spend image API budget on items most likely to be deals.
@@ -888,6 +896,9 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       category:         categorize(item.title),
       matched_keyword:  item.matched_keyword,
       match_type:       item.match_type,
+      starred:          false,
+      first_seen_at:    scanStartedAt,
+      scan_id:          scanId,
       description:      null,
       value_source:     valSource,
       condition:        img?.condition ?? null,
@@ -905,6 +916,6 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   const withImg = deals.filter(d => d.img_summary).length
   const withScore = deals.filter(d => d.deal_score > 0).length
   console.log(`\n[SCAN] Done in ${(totalMs/1000).toFixed(1)}s — ${deals.length} deals | ${withImg} with image analysis | ${withScore} scored`)
-  setScanStatus({ phase: 'done', message: 'Scan complete', detail: `${deals.length} deals found (${withImg} with photo analysis)`, progress: 100, finishedAt: new Date().toISOString() })
+  setScanStatus({ phase: 'done', message: 'Scan complete', detail: `${deals.length} deals found (${withImg} with photo analysis)`, progress: 100, finishedAt: new Date().toISOString(), scanId })
   return deals
 }
