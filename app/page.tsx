@@ -413,11 +413,12 @@ export default function Dashboard() {
   const [minScore, setMinScore] = useState(0)
   const [showDismissed, setShowDismissed] = useState(false)
   const [showStarredOnly, setShowStarredOnly] = useState(false)
+  const [showBiddedOnly, setShowBiddedOnly] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [kwInput, setKwInput] = useState('')
   const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
   const [kwOpen, setKwOpen] = useState(false)
-  const [sortBy, setSortBy] = useState<'score' | 'price_asc' | 'price_desc' | 'ending'>('score')
+  const [sortBy, setSortBy] = useState<'score' | 'roi' | 'price_asc' | 'price_desc' | 'ending'>('score')
   const [scanStatus, setScanStatusData] = useState<ScanStatusData | null>(null)
   const [showProgress, setShowProgress] = useState(false)
 
@@ -532,26 +533,35 @@ export default function Dashboard() {
       const r1 = await fetch('/api/scan/crawl', { method: 'POST', headers, body: kwBody })
       if (!r1.ok) { const t = await r1.text(); throw new Error(`Crawl failed (${r1.status}): ${t}`) }
       const d1 = await r1.json()
+      if (d1.error) throw new Error(d1.error)
       scanId = d1.scanId
+      if (d1.count === 0) {
+        setScanStatusData(s => s ? { ...s, phase: 'done', message: 'No items found', detail: 'Try different keywords or check source settings', progress: 100 } : null)
+        setScanning(false)
+        return
+      }
     } catch (e) {
       setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Crawl failed', detail: String(e), error: String(e) } : null)
       setScanning(false)
       return
     }
 
-    // Phase 2 + 3: fire estimate, then chain finalize — polling shows live progress
-    fetch('/api/scan/estimate', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
-      .then(async r2 => {
-        if (!r2.ok) throw new Error(`Estimate failed: ${r2.status}`)
-        return fetch('/api/scan/finalize', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
-      })
-      .then(async r3 => {
-        if (r3 && !r3.ok) throw new Error(`Finalize failed: ${r3.status}`)
-      })
-      .catch(e => {
-        setScanStatusData(s => s ? { ...s, phase: 'error', message: '❌ Scan failed', detail: String(e), error: String(e) } : null)
-        setScanning(false)
-      })
+    // Phase 2 + 3: estimate then finalize — each awaited so we can load deals at the end
+    try {
+      const r2 = await fetch('/api/scan/estimate', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
+      if (!r2.ok) throw new Error(`Estimate failed: ${r2.status}`)
+
+      const r3 = await fetch('/api/scan/finalize', { method: 'POST', headers, body: JSON.stringify({ scanId }) })
+      if (!r3.ok) throw new Error(`Finalize failed: ${r3.status}`)
+    } catch (e) {
+      console.error('[SCAN] phase 2/3 error:', e)
+      // Don't bail — finalize may have partially succeeded; fall through to loadDeals
+    }
+
+    // Always load deals when scan completes, regardless of polling state
+    await loadDeals()
+    setLastScan(new Date().toISOString())
+    setScanning(false)
   }
 
   const stopScan = async () => {
@@ -576,6 +586,11 @@ export default function Dashboard() {
     if (a.starred && !b.starred) return -1
     if (!a.starred && b.starred) return 1
     if (sortBy === 'score')      return b.deal_score - a.deal_score
+    if (sortBy === 'roi') {
+      const roiA = a.estimated_value > 0 ? (a.estimated_value - a.current_bid) / a.estimated_value : -1
+      const roiB = b.estimated_value > 0 ? (b.estimated_value - b.current_bid) / b.estimated_value : -1
+      return roiB - roiA
+    }
     if (sortBy === 'price_asc')  return a.current_bid - b.current_bid
     if (sortBy === 'price_desc') return b.current_bid - a.current_bid
     if (sortBy === 'ending') {
@@ -586,7 +601,7 @@ export default function Dashboard() {
     return 0
   })
   const hotDeals = deals.filter(d => d.deal_score >= 70 && !d.dismissed).length
-  const displayDeals = showStarredOnly ? sortedDeals.filter(d => d.starred) : sortedDeals
+  const displayDeals = showBiddedOnly ? sortedDeals.filter(d => d.bidded) : showStarredOnly ? sortedDeals.filter(d => d.starred) : sortedDeals
   const avgScore = deals.length ? Math.round(deals.reduce((s, d) => s + d.deal_score, 0) / deals.length) : 0
 
   return (
@@ -635,16 +650,18 @@ export default function Dashboard() {
               </div>
             )}
             {starredCount > 0 && (
-              <div className="text-xs px-3 py-1.5 rounded-full bg-amber-950 border border-amber-800">
+              <button onClick={() => { setShowStarredOnly(s => !s); setShowBiddedOnly(false) }}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-all ${showStarredOnly ? 'bg-amber-700 border-amber-500 text-white' : 'bg-amber-950 border-amber-800 hover:border-amber-600'}`}>
                 <span className="text-amber-400">⭐ </span>
                 <span className="text-amber-300 font-bold">{starredCount}</span>
-              </div>
+              </button>
             )}
             {activeBidded > 0 && (
-              <div className="text-xs px-3 py-1.5 rounded-full bg-sky-950 border border-sky-800">
-                <span className="text-sky-400">Bid on </span>
+              <button onClick={() => { setShowBiddedOnly(b => !b); setShowStarredOnly(false) }}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-all ${showBiddedOnly ? 'bg-sky-700 border-sky-500 text-white' : 'bg-sky-950 border-sky-800 hover:border-sky-600'}`}>
+                <span className="text-sky-400">🎯 Bids </span>
                 <span className="text-sky-300 font-bold">{activeBidded}</span>
-              </div>
+              </button>
             )}
           </div>
 
@@ -657,6 +674,7 @@ export default function Dashboard() {
             ) : (
               <button onClick={triggerScan} className="btn btn-primary text-xs">⚡ Run Scan</button>
             )}
+            <Link href="/watchlist" className="btn btn-ghost text-xs">📋 Watchlist</Link>
             <Link href="/config" className="btn btn-ghost text-xs">⚙ Config</Link>
           </div>
         </div>
@@ -773,10 +791,11 @@ export default function Dashboard() {
             <span className="text-xs text-slate-600 mr-1">Sort:</span>
             {([
               { val: 'score',      label: '🏆 Score' },
+              { val: 'roi',        label: '📈 ROI' },
               { val: 'price_asc',  label: '💰 Cheapest' },
               { val: 'price_desc', label: '💰 Priciest' },
               { val: 'ending',     label: '⏱ Ending' },
-            ] as const).map(s => (
+            ] as const).map((s: { val: 'score' | 'roi' | 'price_asc' | 'price_desc' | 'ending', label: string }) => (
               <button key={s.val} onClick={() => setSortBy(s.val)}
                 className={`text-xs px-2.5 py-1.5 rounded-md font-semibold transition-all ${
                   sortBy === s.val ? 'bg-sky-900 text-sky-300 border border-sky-700' : 'text-slate-500 hover:text-slate-300'
