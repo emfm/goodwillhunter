@@ -757,14 +757,14 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
 
   // ── Phase 1: Crawl — sequential, polite ───────────────────────────────────
   const totalKeywords = config.keywords.length
-  setScanStatus({ phase: 'crawling_sg', message: 'Scanning keywords…', detail: `0 / ${totalKeywords} keywords`, progress: 5, keywordsTotal: totalKeywords, keywordsDone: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null })
+  await setScanStatus({ phase: 'crawling_sg', message: 'Scanning keywords…', detail: `0 / ${totalKeywords} keywords`, progress: 5, keywordsTotal: totalKeywords, keywordsDone: 0, startedAt: new Date().toISOString(), finishedAt: null, error: null })
 
   for (let kwIdx = 0; kwIdx < config.keywords.length; kwIdx++) {
     const kw = config.keywords[kwIdx]
     const pct = Math.round(5 + (kwIdx / totalKeywords) * 35)
 
     if (config.sources.includes('shopgoodwill')) {
-      setScanStatus({ phase: 'crawling_sg', message: `ShopGoodwill: "${kw}"`, detail: `keyword ${kwIdx + 1} / ${totalKeywords}`, currentKeyword: kw, keywordsDone: kwIdx, progress: pct })
+      await setScanStatus({ phase: 'crawling_sg', message: `ShopGoodwill: "${kw}"`, detail: `keyword ${kwIdx + 1} / ${totalKeywords}`, currentKeyword: kw, keywordsDone: kwIdx, progress: pct })
       try {
         const items = await searchShopGoodwill(kw, config.max_search_price, config.pages_per_keyword)
         const fresh = items.filter(i => !seen.has(i.url))
@@ -775,7 +775,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     }
 
     if (config.sources.includes('ctbids')) {
-      setScanStatus({ phase: 'crawling_ct', message: `CTBids: "${kw}"`, detail: `keyword ${kwIdx + 1} / ${totalKeywords}`, currentKeyword: kw, keywordsDone: kwIdx, progress: pct })
+      await setScanStatus({ phase: 'crawling_ct', message: `CTBids: "${kw}"`, detail: `keyword ${kwIdx + 1} / ${totalKeywords}`, currentKeyword: kw, keywordsDone: kwIdx, progress: pct })
       try {
         const items = await searchCTBids(kw, config.max_search_price, config.pages_per_keyword)
         const fresh = items.filter(i => !seen.has(i.url))
@@ -784,7 +784,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       } catch (e) { console.error(`  [CT] "${kw}" ERROR:`, e) }
     }
 
-    setScanStatus({ keywordsDone: kwIdx + 1, itemsFound: rawItems.length, sgItems: rawItems.filter(i => i.source === 'ShopGoodwill').length, ctItems: rawItems.filter(i => i.source === 'CTBids').length })
+    await setScanStatus({ keywordsDone: kwIdx + 1, itemsFound: rawItems.length, sgItems: rawItems.filter(i => i.source === 'ShopGoodwill').length, ctItems: rawItems.filter(i => i.source === 'CTBids').length })
     if (isStopRequested()) { console.log('[SCAN] Stopped after keyword', kwIdx + 1); break }
     // Pause between keywords — looks like a human browsing
     if (kwIdx < config.keywords.length - 1) await jitter(800, 1800)
@@ -795,9 +795,9 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   const crawlMs = Date.now() - scanStart
   console.log(`\n[SCAN] Crawl done in ${(crawlMs/1000).toFixed(1)}s: ${rawItems.length} total | SG: ${sgCount} | CT: ${ctCount}`)
 
-  setScanStatus({ phase: 'estimating', message: 'Crawl complete', detail: `${rawItems.length} items — SG: ${sgCount}, CTBids: ${ctCount}`, progress: 40, sgItems: sgCount, ctItems: ctCount, itemsFound: rawItems.length })
+  await setScanStatus({ phase: 'estimating', message: 'Crawl complete', detail: `${rawItems.length} items — SG: ${sgCount}, CTBids: ${ctCount}`, progress: 40, sgItems: sgCount, ctItems: ctCount, itemsFound: rawItems.length })
   if (!rawItems.length) {
-    setScanStatus({ phase: 'done', message: 'No items found', detail: 'Try different keywords or check source settings', progress: 100, finishedAt: new Date().toISOString() })
+    await setScanStatus({ phase: 'done', message: 'No items found', detail: 'Try different keywords or check source settings', progress: 100, finishedAt: new Date().toISOString() })
     return []
   }
 
@@ -808,7 +808,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   // Step 2: Claude Haiku in parallel for anything PriceCharting couldn't match
   // Result: real comps where available, AI estimates as fallback
   console.log(`[SCAN] Looking up ${candidates.length} items (PriceCharting + Claude Haiku)...`)
-  setScanStatus({ phase: 'estimating', message: 'Looking up real market prices', detail: `${candidates.length} items via PriceCharting + Claude Haiku`, progress: 42 })
+  await setScanStatus({ phase: 'estimating', message: 'Looking up real market prices', detail: `${candidates.length} items via PriceCharting + Claude Haiku`, progress: 42 })
 
   const valMap = new Map<string, { value: number; source: string }>()
 
@@ -834,7 +834,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
 
   const pcHits = candidates.length - needsHaiku.length
   console.log(`[SCAN] PriceCharting: ${pcHits} hits, ${needsHaiku.length} need Claude estimate`)
-  setScanStatus({ detail: `${pcHits} real prices found, estimating ${needsHaiku.length} via AI...`, progress: 52 })
+  await setScanStatus({ detail: `${pcHits} real prices found, estimating ${needsHaiku.length} via AI...`, progress: 52 })
 
   // Step 2: Claude Haiku for the rest — batches of 20, all parallel
   if (needsHaiku.length > 0) {
@@ -864,7 +864,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   const valMs = Date.now() - scanStart - crawlMs
   const realPrices = [...valMap.values()].filter(v => v.source.startsWith('PriceCharting')).length
   console.log(`[SCAN] Valuation done in ${(valMs/1000).toFixed(1)}s — ${realPrices} real comps, ${valMap.size - realPrices} AI estimates`)
-  setScanStatus({ progress: 60, detail: `${realPrices} real market prices + ${valMap.size - realPrices} AI estimates`, realPrices, aiPrices: valMap.size - realPrices })
+  await setScanStatus({ progress: 60, detail: `${realPrices} real market prices + ${valMap.size - realPrices} AI estimates`, realPrices, aiPrices: valMap.size - realPrices })
 
   // ── Phase 3: Pre-score without images → pick TOP candidates for vision ──────
   // This ensures we only spend image API budget on items most likely to be deals.
@@ -894,20 +894,20 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
     const toAnalyze = imgCandidates.slice(0, safeCount)
 
     console.log(`[SCAN] Analyzing ${toAnalyze.length} images (${(timeElapsed/1000).toFixed(1)}s elapsed, ${(timeLeft/1000).toFixed(1)}s budget remaining)`)
-    setScanStatus({ phase: 'analyzing', message: 'Analyzing photos with Claude Vision', detail: `Top ${toAnalyze.length} candidates`, progress: 62, imagesTotal: toAnalyze.length, imagesAnalyzed: 0 })
+    await setScanStatus({ phase: 'analyzing', message: 'Analyzing photos with Claude Vision', detail: `Top ${toAnalyze.length} candidates`, progress: 62, imagesTotal: toAnalyze.length, imagesAnalyzed: 0 })
 
     // Max 3 concurrent image analyses — same Anthropic rate limit applies
-    setScanStatus({ imagesAnalyzed: 0, detail: `Analyzing ${toAnalyze.length} images...` })
+    await setScanStatus({ imagesAnalyzed: 0, detail: `Analyzing ${toAnalyze.length} images...` })
     const imgResults = await Promise.all(
       toAnalyze.map(item => anthropicLimit(() => analyzeImage(item.image_url, item.title).catch(() => null)))
     )
     toAnalyze.forEach((item, idx) => { imgMap.set(item.url, imgResults[idx] ?? null) })
-    setScanStatus({ imagesAnalyzed: toAnalyze.length, detail: `${toAnalyze.length} images analyzed` })
+    await setScanStatus({ imagesAnalyzed: toAnalyze.length, detail: `${toAnalyze.length} images analyzed` })
     const imgMs = Date.now() - scanStart - crawlMs - valMs
     console.log(`[SCAN] Image analysis done in ${(imgMs/1000).toFixed(1)}s`)
   } else {
     console.log('[SCAN] Image analysis skipped')
-    setScanStatus({ phase: 'analyzing', message: 'Skipping image analysis', detail: 'Enable in Config → Advanced', progress: 90 })
+    await setScanStatus({ phase: 'analyzing', message: 'Skipping image analysis', detail: 'Enable in Config → Advanced', progress: 90 })
   }
 
   // ── Phase 5: Build final deal rows ─────────────────────────────────────────
@@ -954,6 +954,6 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   const withImg = deals.filter(d => d.img_summary).length
   const withScore = deals.filter(d => d.deal_score > 0).length
   console.log(`\n[SCAN] Done in ${(totalMs/1000).toFixed(1)}s — ${deals.length} deals | ${withImg} with image analysis | ${withScore} scored`)
-  setScanStatus({ phase: 'done', message: 'Scan complete', detail: `${deals.length} deals found (${withImg} with photo analysis)`, progress: 100, finishedAt: new Date().toISOString(), scanId })
+  await setScanStatus({ phase: 'done', message: 'Scan complete', detail: `${deals.length} deals found (${withImg} with photo analysis)`, progress: 100, finishedAt: new Date().toISOString(), scanId })
   return deals
 }
