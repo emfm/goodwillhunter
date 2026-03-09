@@ -587,9 +587,14 @@ export default function Dashboard() {
     if (!a.starred && b.starred) return 1
     if (sortBy === 'score')      return b.deal_score - a.deal_score
     if (sortBy === 'roi') {
-      const roiA = a.estimated_value > 0 ? (a.estimated_value - a.current_bid) / a.estimated_value : -1
-      const roiB = b.estimated_value > 0 ? (b.estimated_value - b.current_bid) / b.estimated_value : -1
-      return roiB - roiA
+      // Score by absolute profit potential, not % — avoids $1 bid items dominating
+      // Formula: (est_value - bid) * roi_pct — rewards both high margin AND high value
+      const profitA = a.estimated_value > 0 && a.current_bid > 0 ? (a.estimated_value - a.current_bid) : -999
+      const profitB = b.estimated_value > 0 && b.current_bid > 0 ? (b.estimated_value - b.current_bid) : -999
+      const pctA = a.estimated_value > 0 && a.current_bid > 0 ? (a.estimated_value - a.current_bid) / a.estimated_value : 0
+      const pctB = b.estimated_value > 0 && b.current_bid > 0 ? (b.estimated_value - b.current_bid) / b.estimated_value : 0
+      // Weight: profit × pct — so $50 profit at 80% beats $3 profit at 90%
+      return (profitB * pctB) - (profitA * pctA)
     }
     if (sortBy === 'price_asc')  return a.current_bid - b.current_bid
     if (sortBy === 'price_desc') return b.current_bid - a.current_bid
