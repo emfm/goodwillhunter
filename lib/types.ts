@@ -27,6 +27,9 @@ export interface Deal {
   notified: boolean
   dismissed: boolean
   bidded: boolean
+  starred: boolean          // pinned to top, always visible
+  first_seen_at: string     // when first found — for NEW badge
+  scan_id: string | null    // which scan found it
   created_at: string
   updated_at: string
 }
