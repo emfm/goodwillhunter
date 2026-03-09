@@ -544,27 +544,22 @@ async function estimateValueBatch(titles: string[]): Promise<Array<{ value: numb
     })
 
     if (res.status === 429) {
-      // Rate limited — wait 5s and retry once
       console.warn('[VALUE] 429 rate limit — waiting 5s before retry')
       await new Promise(r => setTimeout(r, 5000))
       const retry = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 4096, system: VALUE_BATCH_SYSTEM, messages: [{ role: 'user', content: `Estimate resale values for these auction items:
-
-${prompt}` }] }),
+        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 4096, system: VALUE_BATCH_SYSTEM, messages: [{ role: 'user', content: 'Estimate resale values for these auction items:\n\n' + prompt }] }),
         signal: AbortSignal.timeout(30000),
       })
-      if (!retry.ok) { console.error('[VALUE] Retry also failed:', retry.status); return titles.map(() => ({ value: 0, source: '' })) }
+      if (!retry.ok) { console.error('[VALUE] Retry failed:', retry.status); return titles.map(() => ({ value: 0, source: '' })) }
       const retryData = await retry.json()
-      const retryRaw = retryData.content?.[0]?.text?.trim() ?? ''
+      const retryRaw = (retryData.content?.[0]?.text ?? '').trim()
       if (retryRaw) {
         try {
-          const clean = retryRaw.replace(/^```[a-z]*
-?|
-?```$/gm, '').trim()
-          const parsed = JSON.parse(clean) as Array<{ value: number; note: string }>
-          return parsed.map(p => ({ value: Math.round((Number(p.value) || 0) * 100) / 100, source: p.note ? `Claude: ${p.note}` : 'Claude estimate' }))
+          const retryClean = retryRaw.replace(/^```[a-z]*/gm, '').replace(/```$/gm, '').trim()
+          const retryParsed = JSON.parse(retryClean) as Array<{ value: number; note: string }>
+          return retryParsed.map(p => ({ value: Math.round((Number(p.value) || 0) * 100) / 100, source: p.note ? 'Claude: ' + p.note : 'Claude estimate' }))
         } catch { return titles.map(() => ({ value: 0, source: '' })) }
       }
       return titles.map(() => ({ value: 0, source: '' }))
