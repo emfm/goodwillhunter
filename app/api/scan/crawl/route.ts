@@ -24,9 +24,14 @@ export async function POST(req: NextRequest) {
     if (body.keywords?.length) config.keywords = body.keywords
 
     const scanId = `scan_${Date.now()}`
+
+    // Clean up any leftover raw items from previous failed scans
+    const db0 = supabaseAdmin()
+    await db0.from('raw_scan_items').delete().lt('created_at', new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString()).catch(() => {})
+
     const { items } = await crawlSources(config, scanId)
 
-    if (!items.length) {
+    if (!items.length) { // raw items check before dedup
       await setScanStatus({ phase: 'done', message: 'No items found', detail: 'Try different keywords', progress: 100, finishedAt: new Date().toISOString() })
       return NextResponse.json({ ok: true, scanId, count: 0 })
     }
@@ -37,10 +42,15 @@ export async function POST(req: NextRequest) {
     // Create table if missing (idempotent)
     try { await db.rpc('exec_sql', { sql: `ALTER TABLE raw_scan_items DISABLE ROW LEVEL SECURITY;` }) } catch { /* ok */ }
 
+    // Deduplicate by URL before inserting — same item can appear under multiple keywords
+    const seenUrls = new Set<string>()
+    const uniqueItems = items.filter(item => { if (seenUrls.has(item.url)) return false; seenUrls.add(item.url); return true })
+    console.log(`[CRAWL] ${items.length} items → ${uniqueItems.length} after dedup`)
+
     const CHUNK = 500
     let stored = 0
-    for (let i = 0; i < items.length; i += CHUNK) {
-      const chunk = items.slice(i, i + CHUNK).map(item => ({
+    for (let i = 0; i < uniqueItems.length; i += CHUNK) {
+      const chunk = uniqueItems.slice(i, i + CHUNK).map(item => ({
         scan_id: scanId,
         url: item.url,
         title: item.title,
@@ -67,12 +77,12 @@ export async function POST(req: NextRequest) {
 
     await setScanStatus({
       phase: 'estimating', message: 'Crawl complete', progress: 35,
-      detail: `${stored} items stored — SG: ${items.filter(i => i.source==='ShopGoodwill').length}, CT: ${items.filter(i=>i.source==='CTBids').length}`,
-      itemsFound: items.length,
-      sgItems: items.filter(i => i.source === 'ShopGoodwill').length,
-      ctItems: items.filter(i => i.source === 'CTBids').length,
+      detail: `${stored} items stored — SG: ${uniqueItems.filter(i => i.source==='ShopGoodwill').length}, CT: ${uniqueItems.filter(i=>i.source==='CTBids').length}`,
+      itemsFound: uniqueItems.length,
+      sgItems: uniqueItems.filter(i => i.source === 'ShopGoodwill').length,
+      ctItems: uniqueItems.filter(i => i.source === 'CTBids').length,
     })
-    console.log(`[CRAWL] Done: ${stored}/${items.length} stored, scan_id=${scanId}`)
+    console.log(`[CRAWL] Done: ${stored}/${uniqueItems.length} stored, scan_id=${scanId}`)
     return NextResponse.json({ ok: true, scanId, count: stored })
   } catch (err) {
     console.error('[CRAWL] fatal:', err)
