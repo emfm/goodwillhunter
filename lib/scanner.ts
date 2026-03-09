@@ -404,7 +404,7 @@ async function searchCTBids(keyword: string, maxPrice: number, pages: number): P
       const { bid = 0, bidCount = 0 } = bidMap[item.id] ?? {}
       if (bid > maxPrice) { overPriceCount++; return [] }
       return [{ title: item.title ?? '', current_bid: bid,
-        url: `https://www.ctbids.com/#!/estate-sale/${item.saleid}/item/${item.id}/${item.itemseourl ?? ''}`,
+        url: `https://ctbids.com/estate-sale/${item.saleid}/item/${item.id}`,
         image_url: item.displayimageurl ?? item.thumbnailurl ?? '',
         end_time: endTime, time_remaining: timeRemaining(endTime),
         num_bids: bidCount, source: 'CTBids' as const,
