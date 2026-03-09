@@ -1053,6 +1053,7 @@ const SIGNATURE_PATTERNS = [/\bsigned\b/i, /\bautograph/i, /\bcoa\b/i, /\bjsa\b/
 async function estimateSignatureWithSearch(item: RawItemRow): Promise<{ value: number; source: string }> {
   if (!process.env.ANTHROPIC_API_KEY) return { value: 0, source: '' }
   try {
+    const prompt = 'Search eBay sold listings for this signed/autographed item and give me a realistic resale value.\n\nItem: "' + item.title + '"\n\nFind recent eBay SOLD prices. Consider COA authenticity, who signed it, and item type.\n\nReply in this exact JSON format only: {"value": 125.00, "note": "brief reason"}'
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
@@ -1060,26 +1061,19 @@ async function estimateSignatureWithSearch(item: RawItemRow): Promise<{ value: n
         model: 'claude-sonnet-4-20250514',
         max_tokens: 300,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-        messages: [{
-          role: 'user',
-          content: \`Search eBay sold listings for this signed/autographed item and give me a realistic resale value. Item: "\${item.title}"
-
-Search for recent eBay SOLD prices for this specific item or comparable items. Consider COA authenticity, who signed it, and item type.
-
-Reply in this exact JSON format only: {"value": 125.00, "note": "brief reason with source"}\`
-        }]
+        messages: [{ role: 'user', content: prompt }]
       }),
-      signal: AbortSignal.timeout(25000),
+      signal: AbortSignal.timeout(30000),
     })
     if (!res.ok) return { value: 0, source: '' }
     const data = await res.json()
-    const text = data.content?.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('') ?? ''
-    const match = text.match(/\{[^{}]*"value"[^{}]*\}/)
+    const text = (data.content ?? []).filter((b: any) => b.type === 'text').map((b: any) => b.text).join('')
+    const match = text.match(/\{"value"[^{}]*\}|\{[^{}]*"value"[^{}]*\}/)
     if (!match) return { value: 0, source: '' }
     const parsed = JSON.parse(match[0])
-    return { value: Math.round((Number(parsed.value) || 0) * 100) / 100, source: \`Web search: \${parsed.note ?? ''}\` }
+    return { value: Math.round((Number(parsed.value) || 0) * 100) / 100, source: 'Web: ' + (parsed.note ?? '') }
   } catch (e) {
-    console.error('[SIGNATURE] search estimate failed:', e)
+    console.error('[SIGNATURE] search failed:', e)
     return { value: 0, source: '' }
   }
 }
@@ -1091,13 +1085,12 @@ export async function estimateValuesForScan(
   const updates: Array<{ url: string; value: number; source: string }> = []
   let realPrices = 0
 
-  // Split: signatures get Sonnet+web search, everything else gets PriceCharting then Haiku
   const signatureItems = items.filter(i => SIGNATURE_PATTERNS.some(p => p.test(i.title)))
   const regularItems = items.filter(i => !SIGNATURE_PATTERNS.some(p => p.test(i.title)))
-  console.log(\`[ESTIMATE] \${items.length} items: \${signatureItems.length} signatures (Sonnet), \${regularItems.length} regular (PC+Haiku)\`)
+  console.log('[ESTIMATE] ' + items.length + ' items: ' + signatureItems.length + ' signatures, ' + regularItems.length + ' regular')
 
-  // ── Signatures: Sonnet + web search (max 3 concurrent to avoid rate limits)
-  await setScanStatus({ detail: \`Researching \${signatureItems.length} signed items…\`, progress: 42 })
+  // Signatures: Sonnet + web search, batches of 3
+  await setScanStatus({ detail: 'Researching ' + signatureItems.length + ' signed items…', progress: 42 })
   for (let i = 0; i < signatureItems.length; i += 3) {
     const batch = signatureItems.slice(i, i + 3)
     const results = await Promise.all(batch.map(item => estimateSignatureWithSearch(item)))
@@ -1106,11 +1099,12 @@ export async function estimateValuesForScan(
       updates.push({ url: item.url, value: r.value, source: r.source })
       if (r.value > 0) realPrices++
     })
-    await setScanStatus({ detail: \`Signed items: \${Math.min(i + 3, signatureItems.length)}/\${signatureItems.length} researched…\`, progress: Math.round(42 + (Math.min(i+3, signatureItems.length) / items.length) * 20) })
+    const done = Math.min(i + 3, signatureItems.length)
+    await setScanStatus({ detail: 'Signed items: ' + done + '/' + signatureItems.length + ' researched…', progress: Math.round(42 + (done / items.length) * 20) })
     if (i + 3 < signatureItems.length) await new Promise(r => setTimeout(r, 800))
   }
 
-  // ── Regular items: PriceCharting first, then Haiku for misses
+  // Regular items: PriceCharting then Haiku
   const pcResults = await Promise.all(regularItems.map(i => lookupPricecharting(i.title).catch(() => null)))
   const needsHaiku: RawItemRow[] = []
   regularItems.forEach((item, idx) => {
@@ -1123,7 +1117,7 @@ export async function estimateValuesForScan(
     }
   })
 
-  await setScanStatus({ detail: \`\${realPrices} real comps, estimating \${needsHaiku.length} via AI…\`, progress: 62 })
+  await setScanStatus({ detail: realPrices + ' real comps, estimating ' + needsHaiku.length + ' via AI…', progress: 62 })
 
   const VALUE_BATCH = 20
   for (let i = 0; i < needsHaiku.length; i += VALUE_BATCH) {
@@ -1134,10 +1128,10 @@ export async function estimateValuesForScan(
         updates.push({ url: item.url, value: results[idx]?.value ?? 0, source: results[idx]?.source ?? '' })
       })
     } catch (e) {
-      console.error(\`[ESTIMATE] Haiku batch \${i} failed:\`, e)
+      console.error('[ESTIMATE] Haiku batch ' + i + ' failed:', e)
       batch.forEach(item => updates.push({ url: item.url, value: 0, source: '' }))
     }
-    await setScanStatus({ detail: \`\${updates.length}/\${items.length} priced…\`, progress: Math.round(62 + (updates.length / items.length) * 18) })
+    await setScanStatus({ detail: updates.length + '/' + items.length + ' priced…', progress: Math.round(62 + (updates.length / items.length) * 18) })
     if (i + VALUE_BATCH < needsHaiku.length) await new Promise(r => setTimeout(r, 500))
   }
 
