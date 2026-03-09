@@ -509,17 +509,36 @@ async function lookupPricecharting(title: string): Promise<{ value: number; sour
 
 // Batch multiple titles into one Claude call to save time + cost
 
-const VALUE_BATCH_SYSTEM = `You are an expert resale price estimator for thrift auction items — vintage video games, retro electronics, big-box PC games, trading cards, signed memorabilia, and collectibles.
+const VALUE_BATCH_SYSTEM = `You are an expert resale price estimator for thrift auction items. You specialize in: vintage video games, retro electronics, signed memorabilia/autographs, trading cards, comics, big-box PC games, and collectibles.
 
-Given a list of auction item titles, estimate the realistic resale value (what it would sell for on eBay in used/good condition). Be conservative — base your estimate on actual recent sold prices.
+For each item title, estimate the realistic eBay SOLD price (not listing price — actual recent sales).
 
-Respond ONLY with a JSON array in this exact format, one entry per title in the same order:
-[{"value": 25.00, "note": "NES game, loose cart, common title"}, ...]
+CRITICAL RULES FOR SIGNATURES/AUTOGRAPHS:
+- A signed item with COA (Certificate of Authenticity) from PSA, JSA, Beckett, Radtke, or similar = dramatically higher value
+- Muhammad Ali signed anything with COA = $500-5000+ depending on item
+- Beatles/band signed items with COA = $1000-10000+
+- NFL/NBA Hall of Famers signed with COA = $100-500+
+- Unknown or minor celebrities = much lower, $20-100
+- "Signed" without COA mention = assume lower value (authenticity risk)
+- Lot of signed balls/items by multiple players = value each separately then sum
 
-Rules:
-- value: USD number, 0 if you have no idea or it's clearly junk/non-collectible
-- note: very brief reason (one short phrase)
-- Never refuse or add any other text — just the JSON array`
+CRITICAL RULES FOR ART/PRINTS:
+- "Signed & Numbered" limited edition prints by known artists (G. Harvey, Bev Doolittle, etc.) = $50-500
+- Original paintings vs prints: originals are worth 5-20x more
+- Unknown artist signatures = low value ($10-50)
+
+CRITICAL RULES FOR GAMES:
+- CIB (Complete In Box) = 2-3x loose cart value
+- Sealed/NIB = 5-20x loose value
+- Nintendo 64, GameCube, SNES games vary wildly by title — use specific knowledge
+- Common NES carts = $5-15, rare ones = $50-500+
+
+Respond ONLY with a JSON array, one entry per title, same order:
+[{"value": 25.00, "note": "brief reason"}, ...]
+
+- value: USD number (0 only if genuinely worthless junk with no collector appeal)
+- note: one short phrase explaining your estimate
+- Never add any other text — just the JSON array`
 
 async function estimateValueBatch(titles: string[]): Promise<Array<{ value: number; source: string }>> {
   if (!titles.length) return []
