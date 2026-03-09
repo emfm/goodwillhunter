@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import { Deal } from '@/lib/types'
+import { createClient } from '@supabase/supabase-js'
 
 // ── Scan progress overlay ────────────────────────────────────────────────────
 interface ScanStatusData {
@@ -459,27 +460,48 @@ export default function Dashboard() {
     })()
   }, [])
 
-  // Poll scan progress every 1.5s while scanning
+  // Poll scan progress every 2s — reads Supabase directly to avoid Vercel Lambda isolation
   useEffect(() => {
     if (!scanning) return
     setShowProgress(true)
+    const db = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    )
     const interval = setInterval(async () => {
       try {
-        const r = await fetch('/api/scan-progress')
-        if (r.ok) {
-          const s = await r.json()
-          setScanStatusData(s)
-          if (s.phase === 'done' || s.phase === 'error') {
-            clearInterval(interval)
-            setScanning(false)
-            if (s.phase === 'done') {
-              await loadDeals()
-              setLastScan(new Date().toISOString())
-            }
+        const { data } = await db.from('scan_status').select('*').eq('id', 1).single()
+        if (!data) return
+        const s: ScanStatusData = {
+          phase: data.phase ?? 'idle',
+          message: data.message ?? '',
+          detail: data.detail ?? '',
+          progress: data.progress ?? 0,
+          itemsFound: data.items_found ?? 0,
+          sgItems: data.sg_items ?? 0,
+          ctItems: data.ct_items ?? 0,
+          currentKeyword: data.current_keyword ?? '',
+          keywordsDone: data.keywords_done ?? 0,
+          keywordsTotal: data.keywords_total ?? 0,
+          imagesAnalyzed: data.images_analyzed ?? 0,
+          imagesTotal: data.images_total ?? 0,
+          realPrices: data.real_prices ?? 0,
+          aiPrices: data.ai_prices ?? 0,
+          scanId: data.scan_id ?? undefined,
+          error: data.error ?? null,
+        }
+        setScanStatusData(s)
+        if (s.phase === 'done' || s.phase === 'error') {
+          clearInterval(interval)
+          setScanning(false)
+          if (s.phase === 'done') {
+            await loadDeals()
+            setLastScan(new Date().toISOString())
+            if (s.scanId) setLastScanId(s.scanId)
           }
         }
-      } catch { /* ignore polling errors */ }
-    }, 1500)
+      } catch { /* ignore */ }
+    }, 2000)
     return () => clearInterval(interval)
   }, [scanning, loadDeals])
 
