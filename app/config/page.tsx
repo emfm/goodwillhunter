@@ -413,6 +413,7 @@ export default function Dashboard() {
   const [minScore, setMinScore] = useState(0)
   const [showDismissed, setShowDismissed] = useState(false)
   const [showStarredOnly, setShowStarredOnly] = useState(false)
+  const [showBiddedOnly, setShowBiddedOnly] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [kwInput, setKwInput] = useState('')
   const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
@@ -595,7 +596,7 @@ export default function Dashboard() {
     return 0
   })
   const hotDeals = deals.filter(d => d.deal_score >= 70 && !d.dismissed).length
-  const displayDeals = showStarredOnly ? sortedDeals.filter(d => d.starred) : sortedDeals
+  const displayDeals = showBiddedOnly ? sortedDeals.filter(d => d.bidded) : showStarredOnly ? sortedDeals.filter(d => d.starred) : sortedDeals
   const avgScore = deals.length ? Math.round(deals.reduce((s, d) => s + d.deal_score, 0) / deals.length) : 0
 
   return (
@@ -644,16 +645,18 @@ export default function Dashboard() {
               </div>
             )}
             {starredCount > 0 && (
-              <div className="text-xs px-3 py-1.5 rounded-full bg-amber-950 border border-amber-800">
+              <button onClick={() => { setShowStarredOnly(s => !s); setShowBiddedOnly(false) }}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-all ${showStarredOnly ? 'bg-amber-700 border-amber-500 text-white' : 'bg-amber-950 border-amber-800 hover:border-amber-600'}`}>
                 <span className="text-amber-400">⭐ </span>
                 <span className="text-amber-300 font-bold">{starredCount}</span>
-              </div>
+              </button>
             )}
             {activeBidded > 0 && (
-              <div className="text-xs px-3 py-1.5 rounded-full bg-sky-950 border border-sky-800">
-                <span className="text-sky-400">Bid on </span>
+              <button onClick={() => { setShowBiddedOnly(b => !b); setShowStarredOnly(false) }}
+                className={`text-xs px-3 py-1.5 rounded-full border transition-all ${showBiddedOnly ? 'bg-sky-700 border-sky-500 text-white' : 'bg-sky-950 border-sky-800 hover:border-sky-600'}`}>
+                <span className="text-sky-400">🎯 Bids </span>
                 <span className="text-sky-300 font-bold">{activeBidded}</span>
-              </div>
+              </button>
             )}
           </div>
 
