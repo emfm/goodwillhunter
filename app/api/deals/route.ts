@@ -37,6 +37,7 @@ export async function GET(req: NextRequest) {
     if (source)         q = q.eq('source', source)
     if (category && category !== 'All') q = q.eq('category', category)
     if (minScore > 0)   q = q.gte('deal_score', minScore)
+    if (minValue > 0)   q = q.gte('estimated_value', minValue)
 
     const { data, error } = await q
 
