@@ -120,7 +120,7 @@ export default function WatchlistPage() {
 
   const load = useCallback(() => {
     setLoading(true)
-    fetch('/api/deals?showDismissed=false')
+    fetch('/api/deals?watchlist=true')
       .then(r => r.json())
       .then((data: Deal[]) => {
         if (Array.isArray(data)) setAllDeals(data)
@@ -143,7 +143,7 @@ export default function WatchlistPage() {
     return aEnd - bEnd // soonest ending first
   })
 
-  const watching = allDeals.filter(d => d.starred && !d.bidded).sort((a, b) => {
+  const watching = allDeals.filter(d => d.starred).sort((a, b) => {
     return new Date(a.end_time).getTime() - new Date(b.end_time).getTime()
   })
 
