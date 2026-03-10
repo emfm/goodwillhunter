@@ -400,6 +400,7 @@ const SOURCES = ['All', 'ShopGoodwill', 'CTBids']
 // Starred filter is handled via showStarredOnly state
 const CATEGORIES = ['All', 'Computer Games', 'Trading Cards', 'Signatures', 'Comics', 'Vintage Electronics', 'General', 'Other']
 const SCORES = [{ label: 'Any score', val: 0 }, { label: '50+', val: 50 }, { label: '60+', val: 60 }, { label: '70+ 🔥', val: 70 }, { label: '80+ 💎', val: 80 }]
+const MIN_VALUES = [{ label: 'Any value', val: 0 }, { label: '$25+', val: 25 }, { label: '$50+', val: 50 }, { label: '$100+', val: 100 }, { label: '$250+', val: 250 }, { label: '$500+', val: 500 }]
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function Dashboard() {
@@ -412,6 +413,7 @@ export default function Dashboard() {
   const [source, setSource] = useState('All')
   const [category, setCategory] = useState('All')
   const [minScore, setMinScore] = useState(0)
+  const [minValue, setMinValue] = useState(50)
   const [showDismissed, setShowDismissed] = useState(false)
   const [showStarredOnly, setShowStarredOnly] = useState(false)
   const [showBiddedOnly, setShowBiddedOnly] = useState(false)
@@ -434,6 +436,7 @@ export default function Dashboard() {
     if (source !== 'All') params.set('source', source)
     if (category !== 'All') params.set('category', category)
     if (minScore > 0) params.set('minScore', String(minScore))
+    if (minValue > 0) params.set('minValue', String(minValue))
     if (showDismissed) params.set('showDismissed', 'true')
     try {
       const res = await fetch(`/api/deals?${params}`)
@@ -444,7 +447,7 @@ export default function Dashboard() {
       console.error('deals fetch error:', e)
     }
     setLoading(false)
-  }, [source, category, minScore, showDismissed])
+  }, [source, category, minScore, minValue, showDismissed])
 
   useEffect(() => { loadDeals() }, [loadDeals])
 
@@ -791,6 +794,11 @@ export default function Dashboard() {
           {/* Min score */}
           <select value={minScore} onChange={e => setMinScore(Number(e.target.value))} className="w-auto text-xs py-1.5 pl-2 pr-6">
             {SCORES.map(s => <option key={s.val} value={s.val}>{s.label}</option>)}
+          </select>
+
+          {/* Min value */}
+          <select value={minValue} onChange={e => setMinValue(Number(e.target.value))} className="w-auto text-xs py-1.5 pl-2 pr-6">
+            {MIN_VALUES.map(s => <option key={s.val} value={s.val}>{s.label}</option>)}
           </select>
 
           <label className="flex items-center gap-2 text-xs text-slate-400 cursor-pointer ml-auto">
