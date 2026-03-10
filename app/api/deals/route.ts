@@ -10,6 +10,7 @@ export async function GET(req: NextRequest) {
     const source        = searchParams.get('source')
     const category      = searchParams.get('category')
     const minScore      = parseInt(searchParams.get('minScore') ?? '0')
+    const minValue      = parseInt(searchParams.get('minValue') ?? '0')
     const showDismissed = searchParams.get('showDismissed') === 'true'
 
     const db = supabaseAdmin()
