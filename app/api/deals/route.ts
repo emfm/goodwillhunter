@@ -13,6 +13,20 @@ export async function GET(req: NextRequest) {
     const showDismissed = searchParams.get('showDismissed') === 'true'
 
     const db = supabaseAdmin()
+    const watchlist = searchParams.get('watchlist') === 'true'
+
+    if (watchlist) {
+      // Watchlist mode: return ALL starred or bidded items, no limit, no score filter
+      const { data, error } = await db
+        .from('deals')
+        .select('*')
+        .or('starred.eq.true,bidded.eq.true')
+        .neq('dismissed', true)
+        .order('end_time', { ascending: true })
+      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      return NextResponse.json(data ?? [])
+    }
+
     let q = db
       .from('deals')
       .select('*')
