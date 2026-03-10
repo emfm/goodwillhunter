@@ -1,39 +1,25 @@
-// app/api/deals/route.ts  ← this is the LIST route, NOT [id]
+// app/api/deals/[id]/route.ts  ← note: this goes in the [id] subfolder
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase'
 
-export const dynamic = 'force-dynamic'
-
-export async function GET(req: NextRequest) {
+export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { searchParams } = new URL(req.url)
-    const source        = searchParams.get('source')
-    const category      = searchParams.get('category')
-    const minScore      = parseInt(searchParams.get('minScore') ?? '0')
-    const showDismissed = searchParams.get('showDismissed') === 'true'
-
-    const db = supabaseAdmin()
-    let q = db
-      .from('deals')
-      .select('*')
-      .order('deal_score', { ascending: false })
-      .limit(500)
-
-    if (!showDismissed) q = q.or('dismissed.is.null,dismissed.eq.false')
-    if (source)         q = q.eq('source', source)
-    if (category && category !== 'All') q = q.eq('category', category)
-    if (minScore > 0)   q = q.gte('deal_score', minScore)
-
-    const { data, error } = await q
-
-    if (error) {
-      console.error('[API/deals] Supabase error:', error.message)
-      return NextResponse.json({ error: error.message }, { status: 500 })
+    const body = await req.json()
+    const allowed = ['dismissed', 'bidded', 'starred']
+    const update: Record<string, unknown> = {}
+    for (const key of allowed) {
+      if (key in body) update[key] = body[key]
     }
-
-    return NextResponse.json(data ?? [])
-  } catch (err) {
-    console.error('[API/deals] Unexpected error:', err)
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    if (!Object.keys(update).length) {
+      return NextResponse.json({ error: 'No valid fields' }, { status: 400 })
+    }
+    const { error } = await supabaseAdmin()
+      .from('deals')
+      .update(update)
+      .eq('id', params.id)
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    return NextResponse.json({ error: String(e) }, { status: 500 })
   }
 }
