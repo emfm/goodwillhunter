@@ -1085,29 +1085,36 @@ export async function estimateValuesForScan(
   const updates: Array<{ url: string; value: number; source: string }> = []
   let realPrices = 0
 
-  const signatureItems = items.filter(i => SIGNATURE_PATTERNS.some(p => p.test(i.title)))
+  const allSigItems = items.filter(i => SIGNATURE_PATTERNS.some(p => p.test(i.title)))
+  // Cap Sonnet+search at 20 to stay within 300s budget; remainder falls through to Haiku
+  const MAX_SONNET_SIGS = 20
+  const signatureItems = allSigItems.slice(0, MAX_SONNET_SIGS)
+  const sigOverflow = allSigItems.slice(MAX_SONNET_SIGS)
   const regularItems = items.filter(i => !SIGNATURE_PATTERNS.some(p => p.test(i.title)))
-  console.log('[ESTIMATE] ' + items.length + ' items: ' + signatureItems.length + ' signatures, ' + regularItems.length + ' regular')
+  console.log('[ESTIMATE] ' + items.length + ' items: ' + signatureItems.length + ' sigs (Sonnet), ' + sigOverflow.length + ' sigs (Haiku), ' + regularItems.length + ' regular')
 
-  // Signatures: Sonnet + web search, batches of 3
-  await setScanStatus({ detail: 'Researching ' + signatureItems.length + ' signed items…', progress: 42 })
-  for (let i = 0; i < signatureItems.length; i += 3) {
-    const batch = signatureItems.slice(i, i + 3)
-    const results = await Promise.all(batch.map(item => estimateSignatureWithSearch(item)))
-    batch.forEach((item, idx) => {
-      const r = results[idx]
-      updates.push({ url: item.url, value: r.value, source: r.source })
-      if (r.value > 0) realPrices++
-    })
-    const done = Math.min(i + 3, signatureItems.length)
-    await setScanStatus({ detail: 'Signed items: ' + done + '/' + signatureItems.length + ' researched…', progress: Math.round(42 + (done / items.length) * 20) })
-    if (i + 3 < signatureItems.length) await new Promise(r => setTimeout(r, 800))
+  // Top 20 signatures: Sonnet + web search, batches of 3
+  if (signatureItems.length > 0) {
+    await setScanStatus({ detail: 'Researching top ' + signatureItems.length + ' signed items…', progress: 42 })
+    for (let i = 0; i < signatureItems.length; i += 3) {
+      const batch = signatureItems.slice(i, i + 3)
+      const results = await Promise.all(batch.map(item => estimateSignatureWithSearch(item)))
+      batch.forEach((item, idx) => {
+        const r = results[idx]
+        updates.push({ url: item.url, value: r.value, source: r.source })
+        if (r.value > 0) realPrices++
+      })
+      const done = Math.min(i + 3, signatureItems.length)
+      await setScanStatus({ detail: 'Signed: ' + done + '/' + signatureItems.length + ' researched…', progress: Math.round(42 + (done / items.length) * 18) })
+      if (i + 3 < signatureItems.length) await new Promise(r => setTimeout(r, 800))
+    }
   }
 
-  // Regular items: PriceCharting then Haiku
-  const pcResults = await Promise.all(regularItems.map(i => lookupPricecharting(i.title).catch(() => null)))
+  // Regular items + overflow sigs: PriceCharting then Haiku
+  const needsPC = [...regularItems, ...sigOverflow]
+  const pcResults = await Promise.all(needsPC.map(i => lookupPricecharting(i.title).catch(() => null)))
   const needsHaiku: RawItemRow[] = []
-  regularItems.forEach((item, idx) => {
+  needsPC.forEach((item, idx) => {
     const pc = pcResults[idx]
     if (pc && pc.value > 0) {
       updates.push({ url: item.url, value: pc.value, source: pc.source })
