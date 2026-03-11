@@ -47,8 +47,8 @@ export async function POST(req: NextRequest) {
     const uniqueItems = items.filter(item => { if (seenUrls.has(item.url)) return false; seenUrls.add(item.url); return true })
     console.log(`[CRAWL] ${items.length} items → ${uniqueItems.length} after dedup`)
 
-    // Delete-then-insert avoids ALL upsert conflict issues
-    const { error: delErr } = await db.from('raw_scan_items').delete().eq('scan_id', scanId)
+    // Wipe ALL raw_scan_items before inserting — only one scan runs at a time
+    const { error: delErr } = await db.from('raw_scan_items').delete().neq('id', 0)
     if (delErr && delErr.code === '42P01') {
       return NextResponse.json({ error: 'Table raw_scan_items not found. Please run migration.sql in Supabase.' }, { status: 500 })
     }
@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
         matched_keyword: item.matched_keyword,
         match_type: item.match_type ?? 'text',
       }))
-      const { error } = await db.from('raw_scan_items').insert(chunk)
+      const { error } = await db.from('raw_scan_items').upsert(chunk, { onConflict: 'url', ignoreDuplicates: false })
       if (error) {
         console.error(`[CRAWL] insert chunk ${i}-${i+CHUNK} error:`, error.message, error.code)
       } else {
