@@ -1100,23 +1100,28 @@ export async function estimateValuesForScan(
     await setScanStatus({ detail: 'Researching signatures: ' + (i+1) + '/' + sonnetSigs.length, progress: Math.round(42 + ((i+1) / items.length) * 15) })
   }
 
-  // ── Phase B: Everything else via Haiku in batches of 50 (fast — ~2s per batch)
+  // ── Phase B: Everything else via Haiku — 5 batches of 50 in parallel
   await setScanStatus({ detail: 'Estimating ' + haikuItems.length + ' items via AI…', progress: 58 })
   const HAIKU_BATCH = 50
+  const PARALLEL = 5
+  const haikuBatches: RawItemRow[][] = []
   for (let i = 0; i < haikuItems.length; i += HAIKU_BATCH) {
-    const batch = haikuItems.slice(i, i + HAIKU_BATCH)
-    try {
-      const results = await estimateValueBatch(batch.map(item => item.title))
-      batch.forEach((item, idx) => {
-        updates.push({ url: item.url, value: results[idx]?.value ?? 0, source: results[idx]?.source ?? 'Haiku' })
-      })
-    } catch (e) {
-      console.error('[ESTIMATE] Haiku batch ' + i + ' failed:', e)
-      batch.forEach(item => updates.push({ url: item.url, value: 0, source: '' }))
-    }
-    const pct = Math.round(58 + (Math.min(i + HAIKU_BATCH, haikuItems.length) / haikuItems.length) * 22)
+    haikuBatches.push(haikuItems.slice(i, i + HAIKU_BATCH))
+  }
+  for (let i = 0; i < haikuBatches.length; i += PARALLEL) {
+    const group = haikuBatches.slice(i, i + PARALLEL)
+    await Promise.all(group.map(async (batch) => {
+      try {
+        const results = await estimateValueBatch(batch.map(item => item.title))
+        batch.forEach((item, idx) => {
+          updates.push({ url: item.url, value: results[idx]?.value ?? 0, source: results[idx]?.source ?? 'Haiku' })
+        })
+      } catch (e) {
+        batch.forEach(item => updates.push({ url: item.url, value: 0, source: '' }))
+      }
+    }))
+    const pct = Math.round(58 + (Math.min((i + PARALLEL) * HAIKU_BATCH, haikuItems.length) / haikuItems.length) * 22)
     await setScanStatus({ detail: updates.length + '/' + items.length + ' priced…', progress: pct })
-    // No delay needed — batches of 50 are well under rate limits
   }
 
   const aiPrices = haikuItems.length
