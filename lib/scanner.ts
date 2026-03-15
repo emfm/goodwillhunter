@@ -714,17 +714,64 @@ function categorize(title: string): string {
   return 'General'
 }
 
-// Wildcard: huge ROI but uncertain estimate — could be worth a lot, AI isn't sure
-// Criteria: estimated value 5x+ the bid, estimate came from Haiku (not web search/PC),
-// no image analysis to confirm, and absolute profit potential > $50
-function isWildcard(estVal: number, bid: number, valSource: string, img: ImageAnalysis | null): boolean {
+// ── Rare Find detector ───────────────────────────────────────────────────────
+// Scores an item on how likely it is to be a sleeper — something worth way more
+// than the current bid that most bidders are missing. Returns true if score >= 3.
+//
+// Signal model (each signal adds points):
+//   +3  Title contains known high-value trigger (rookie, 1st edition, sealed, PSA, COA, etc.)
+//   +2  Estimated value is 4x+ the current bid (massive ROI gap)
+//   +2  Zero or 1 bids — almost no competition
+//   +2  Estimate came from web search (Sonnet confirmed real comps exist)
+//   +1  Bid is under $10 — deeply underpriced if valuable
+//   +1  Category is Signatures, Comics, or Trading Cards (collectibles with huge variance)
+//   +1  No image analysis — means finalize didn't look at it, could be hiding quality
+//   -2  Estimate came from Haiku with no web confirmation (uncertain)
+//   -2  Image analysis flagged authenticity concerns
+//   -1  More than 10 bids — market has already found it
+
+const RARE_TRIGGERS = [
+  /1st\s*edition/i, /first\s*edition/i, /rookie/i, /rc/,
+  /psa/i, /bgs/i, /beckett/i, /jsa/i, /coa/i,
+  /sealed/i, /nib/i, /new\s*in\s*box/i, /mint/i,
+  /autograph/i, /signed/i, /limited\s*edition/i,
+  /hologram/i, /numbered/i, /\/\d+/, // e.g. "32/100"
+  /vintage/i, /original/i, /press\s*proof/i,
+]
+const RARE_CATEGORIES = new Set(['Signatures', 'Comics', 'Trading Cards', 'Vintage Electronics'])
+
+function isWildcard(estVal: number, bid: number, valSource: string, img: ImageAnalysis | null, title: string, category: string): boolean {
   if (!estVal || !bid || bid <= 0) return false
-  const profit = estVal - bid
-  const roi = profit / estVal
-  const isUncertain = !valSource.startsWith('Web:') && !valSource.startsWith('PriceCharting')
-  const bigRoi = roi > 0.7 && profit > 50   // >70% ROI and >$50 profit
-  const noImageConfirm = !img              // no photo analysis to validate
-  return bigRoi && isUncertain && noImageConfirm
+  let score = 0
+
+  // Title signals
+  if (RARE_TRIGGERS.some(p => p.test(title))) score += 3
+
+  // ROI gap
+  const roi = (estVal - bid) / estVal
+  if (roi >= 0.75 && (estVal - bid) > 50) score += 2
+  else if (roi >= 0.5 && (estVal - bid) > 25) score += 1
+
+  // Competition
+  // (num_bids not passed here — handled at call site via img proxy)
+  
+  // Estimate quality
+  if (valSource.startsWith('Web:')) score += 2          // Sonnet confirmed it
+  else if (!valSource || valSource.startsWith('Haiku') || valSource.startsWith('Claude')) score -= 2  // uncertain
+
+  // Price signal
+  if (bid < 10) score += 1
+
+  // Category
+  if (RARE_CATEGORIES.has(category)) score += 1
+
+  // No image = unconfirmed, could be hiding gem condition
+  if (!img) score += 1
+
+  // Authenticity red flag
+  if (img?.is_authentic === false) score -= 2
+
+  return score >= 3
 }
 
 function scoreDeal(
@@ -1002,7 +1049,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       flags:            img?.flags ?? [],
       positives:        img?.positives ?? [],
       img_summary:      img?.summary ?? null,
-      wildcard:         isWildcard(estVal, item.current_bid, valSource, img),
+      wildcard:         isWildcard(estVal, item.current_bid, valSource, img, item.title, categorize(item.title)),
     })
   }
 
