@@ -417,6 +417,7 @@ export default function Dashboard() {
   const [showDismissed, setShowDismissed] = useState(false)
   const [showStarredOnly, setShowStarredOnly] = useState(false)
   const [showBiddedOnly, setShowBiddedOnly] = useState(false)
+  const [showWildcardOnly, setShowWildcardOnly] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [kwInput, setKwInput] = useState('')
   const [overrideKeywords, setOverrideKeywords] = useState<string[]>([])
@@ -663,6 +664,12 @@ export default function Dashboard() {
                 <span className="text-green-400">🔥 Hot </span>
                 <span className="text-green-300 font-bold">{hotDeals}</span>
               </div>
+            )}
+            {wildcardCount > 0 && (
+              <button onClick={() => { setShowWildcardOnly(v => !v); setShowStarredOnly(false); setShowBiddedOnly(false) }}
+                className={`pill ${ showWildcardOnly ? 'bg-purple-600 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`}>
+                🔮 {wildcardCount}
+              </button>
             )}
             {starredCount > 0 && (
               <button onClick={() => { setShowStarredOnly(s => !s); setShowBiddedOnly(false) }}
