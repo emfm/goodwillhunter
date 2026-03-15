@@ -16,10 +16,9 @@ function jitter(minMs: number, maxMs: number) {
   return new Promise(r => setTimeout(r, randInt(minMs, maxMs)))
 }
 
-// Anthropic API concurrency limiter — max 3 simultaneous calls to avoid 429s.
-// With 50+ items we'd fire 3+ concurrent batches otherwise.
+// Anthropic API concurrency limiter — keep at 2 to avoid 429s.
 function makeAnthropicLimiter() {
-  const MAX = 8
+  const MAX = 2
   let running = 0
   const queue: Array<() => void> = []
   return async function<T>(fn: () => Promise<T>): Promise<T> {
@@ -555,7 +554,7 @@ async function estimateValueBatch(titles: string[]): Promise<Array<{ value: numb
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 4096,  // 20 items × ~40 tokens each = ~800 tokens; 4096 gives plenty of room
+        max_tokens: 2048,  // 30 items × ~30 tokens = ~900 tokens; 2048 gives room
         system: VALUE_BATCH_SYSTEM,
         messages: [{ role: 'user', content: `Estimate resale values for these auction items:\n\n${prompt}` }],
       }),
@@ -563,12 +562,12 @@ async function estimateValueBatch(titles: string[]): Promise<Array<{ value: numb
     })
 
     if (res.status === 429) {
-      console.warn('[VALUE] 429 rate limit — waiting 3s before retry')
-      await new Promise(r => setTimeout(r, 3000))
+      console.warn('[VALUE] 429 rate limit — waiting 5s before retry')
+      await new Promise(r => setTimeout(r, 5000))
       const retry = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 4096, system: VALUE_BATCH_SYSTEM, messages: [{ role: 'user', content: 'Estimate resale values for these auction items:\n\n' + prompt }] }),
+        body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 2048, system: VALUE_BATCH_SYSTEM, messages: [{ role: 'user', content: 'Estimate resale values for these auction items:\n\n' + prompt }] }),
         signal: AbortSignal.timeout(30000),
       })
       if (!retry.ok) { console.error('[VALUE] Retry failed:', retry.status); return titles.map(() => ({ value: 0, source: '' })) }
@@ -713,6 +712,19 @@ function categorize(title: string): string {
     if (patterns.some(p => p.test(title))) return cat
   }
   return 'General'
+}
+
+// Wildcard: huge ROI but uncertain estimate — could be worth a lot, AI isn't sure
+// Criteria: estimated value 5x+ the bid, estimate came from Haiku (not web search/PC),
+// no image analysis to confirm, and absolute profit potential > $50
+function isWildcard(estVal: number, bid: number, valSource: string, img: ImageAnalysis | null): boolean {
+  if (!estVal || !bid || bid <= 0) return false
+  const profit = estVal - bid
+  const roi = profit / estVal
+  const isUncertain = !valSource.startsWith('Web:') && !valSource.startsWith('PriceCharting')
+  const bigRoi = roi > 0.7 && profit > 50   // >70% ROI and >$50 profit
+  const noImageConfirm = !img              // no photo analysis to validate
+  return bigRoi && isUncertain && noImageConfirm
 }
 
 function scoreDeal(
@@ -990,6 +1002,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
       flags:            img?.flags ?? [],
       positives:        img?.positives ?? [],
       img_summary:      img?.summary ?? null,
+      wildcard:         isWildcard(estVal, item.current_bid, valSource, img),
     })
   }
 
@@ -1102,8 +1115,8 @@ export async function estimateValuesForScan(
 
   // ── Phase B: Everything else via Haiku — 5 batches of 50 in parallel
   await setScanStatus({ detail: 'Estimating ' + haikuItems.length + ' items via AI…', progress: 58 })
-  const HAIKU_BATCH = 50
-  const PARALLEL = 5
+  const HAIKU_BATCH = 30
+  const PARALLEL = 3
   const haikuBatches: RawItemRow[][] = []
   for (let i = 0; i < haikuItems.length; i += HAIKU_BATCH) {
     haikuBatches.push(haikuItems.slice(i, i + HAIKU_BATCH))
@@ -1122,6 +1135,7 @@ export async function estimateValuesForScan(
     }))
     const pct = Math.round(58 + (Math.min((i + PARALLEL) * HAIKU_BATCH, haikuItems.length) / haikuItems.length) * 22)
     await setScanStatus({ detail: updates.length + '/' + items.length + ' priced…', progress: pct })
+    await new Promise(r => setTimeout(r, 300)) // brief pause between groups
   }
 
   const aiPrices = haikuItems.length
