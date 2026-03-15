@@ -109,7 +109,7 @@ export async function POST(req: NextRequest) {
     const emailThreshold = config.alert_score_threshold ?? 70
     const { data: emailQueue } = await db
       .from('deals').select('*')
-      .in('url', deals.map(d => d.url))
+      .in('url', (deals as any[]).map((d: any) => d.url))
       .eq('notified', false)
       .gte('deal_score', emailThreshold)
       .order('deal_score', { ascending: false })
