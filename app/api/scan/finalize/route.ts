@@ -15,7 +15,7 @@ const BASE_COLUMNS = new Set([
   'url','image_url','source','end_time','time_remaining','num_bids',
   'category','matched_keyword','value_source','condition','condition_score',
   'completeness','is_authentic','value_multiplier','flags','positives',
-  'img_summary','updated_at','match_type','description','starred','first_seen_at','scan_id',
+  'img_summary','updated_at','match_type','description','starred','first_seen_at','scan_id','wildcard',
 ])
 
 export async function POST(req: NextRequest) {
