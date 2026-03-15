@@ -581,6 +581,7 @@ export default function Dashboard() {
 
   const activeBidded = deals.filter(d => d.bidded && !d.dismissed).length
   const starredCount = deals.filter(d => d.starred && !d.dismissed).length
+  const wildcardCount = deals.filter(d => d.wildcard && !d.dismissed).length
 
   const handleStar = (id: string, starred: boolean) => {
     setDeals(prev => prev.map(d => d.id === id ? { ...d, starred } : d))
