@@ -28,6 +28,7 @@ export interface Deal {
   dismissed: boolean
   bidded: boolean
   starred: boolean          // pinned to top, always visible
+  wildcard: boolean           // rare find — high ROI, uncertain value
   first_seen_at: string     // when first found — for NEW badge
   scan_id: string | null    // which scan found it
   created_at: string
