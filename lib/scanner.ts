@@ -778,7 +778,7 @@ function scoreDeal(
 // parallel since it only hits Anthropic's API, not the auction sites.
 const MAX_IMAGE_CANDIDATES = 15
 
-export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[]> {
+export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded' | 'wildcard'> & { wildcard: boolean }[]> {
   resetStopFlag()
   const seen = new Set<string>()
   const rawItems: RawItem[] = []
@@ -966,7 +966,7 @@ export async function runScan(config: AppConfig): Promise<Omit<Deal, 'id' | 'cre
   }
 
   // ── Phase 5: Build final deal rows ─────────────────────────────────────────
-  const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded'>[] = []
+  const deals: Omit<Deal, 'id' | 'created_at' | 'updated_at' | 'notified' | 'dismissed' | 'bidded' | 'wildcard'> & { wildcard: boolean }[] = []
 
   for (const item of candidates) {
     const { value: estVal, source: valSource } = valMap.get(item.url) ?? { value: 0, source: '' }
